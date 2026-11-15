@@ -37,9 +37,9 @@ Projects and automations:
 
 Typing a follow-up in the offline demo. The reply quotes the message and points at provider setup.
 
-![Chat demo](docs/media/chat-demo.gif)
+![Chat demo](docs/media/chat_demo.gif)
 
-A video of the same interaction: [chat-demo.mp4](docs/media/chat-demo.mp4).
+A video of the same interaction: [chat-demo.mp4](docs/media/chat_demo.mp4).
 
 ## What it does
 
