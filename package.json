@@ -1,0 +1,25 @@
+{
+  "name": "freeagent",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Desktop AI agent that routes work across free AI APIs, web chat plans and local coding agents.",
+  "packageManager": "pnpm@10.33.4",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @freeagent/server build && pnpm --filter @freeagent/desktop dev",
+    "server": "pnpm --filter @freeagent/server start",
+    "server:dev": "pnpm --filter @freeagent/server dev",
+    "mcp": "pnpm --silent --filter @freeagent/server mcp",
+    "telegram": "pnpm --filter @freeagent/telegram start",
+    "build": "pnpm --filter @freeagent/server build && pnpm --filter @freeagent/desktop build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "vitest run",
+    "browsers": "pnpm --filter @freeagent/core exec playwright install chromium"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vitest": "^4.0.0"
+  }
+}

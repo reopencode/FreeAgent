@@ -1,0 +1,10 @@
+node_modules
+dist
+out
+.data
+*.log
+.DS_Store
+.eslintcache
+.env
+.env.*
+.codegraph

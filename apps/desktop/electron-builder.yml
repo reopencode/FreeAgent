@@ -1,0 +1,47 @@
+appId: app.freeagent.desktop
+productName: FreeAgent
+directories:
+  buildResources: build
+files:
+  - '!**/.vscode/*'
+  - '!src/*'
+  - '!electron.vite.config.{js,ts,mjs,cjs}'
+  - '!{.eslintcache,eslint.config.mjs,.prettierignore,.prettierrc.yaml,dev-app-update.yml,CHANGELOG.md,README.md}'
+  - '!{.env,.env.*,.npmrc,pnpm-lock.yaml}'
+  - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json,components.json}'
+# The bundled server runs under Electron's Node (ELECTRON_RUN_AS_NODE). Playwright stays a real
+# package next to it because it ships its own driver files; Chromium itself downloads on first use.
+extraResources:
+  - from: ../server/dist
+    to: server
+    filter: ['**/*', '!**/*.map']
+  - from: ../server/node_modules/playwright
+    to: server/node_modules/playwright
+  - from: ../server/node_modules/playwright-core
+    to: server/node_modules/playwright-core
+asarUnpack:
+  - resources/**
+win:
+  executableName: FreeAgent
+nsis:
+  artifactName: ${name}-${version}-setup.${ext}
+  shortcutName: ${productName}
+  uninstallDisplayName: ${productName}
+  createDesktopShortcut: always
+mac:
+  entitlementsInherit: build/entitlements.mac.plist
+  extendInfo:
+    - NSDocumentsFolderUsageDescription: FreeAgent reads and writes files in project folders you choose.
+    - NSDownloadsFolderUsageDescription: FreeAgent reads and writes files in project folders you choose.
+  notarize: false
+dmg:
+  artifactName: ${name}-${version}.${ext}
+linux:
+  target:
+    - AppImage
+    - deb
+  maintainer: FreeAgent
+  category: Development
+appImage:
+  artifactName: ${name}-${version}.${ext}
+npmRebuild: false
