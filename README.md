@@ -14,6 +14,33 @@ FreeAgent also runs a local server, so other tools can use your free providers:
 - **Claude Desktop** loads it as an MCP server.
 - **Cursor, Continue, Aider and OpenCode** can use its OpenAI-compatible endpoint.
 
+## Screenshots
+
+New chat, with the offline demo ready until a provider is configured:
+
+![New chat](docs/media/new-chat.png)
+
+A chat in the offline demo. Replies are canned until you add an OpenRouter or Gemini key, or connect a web plan:
+
+![Chat](docs/media/chat.png)
+
+Customize → Providers:
+
+![Providers](docs/media/providers.png)
+
+Projects and automations:
+
+![Projects](docs/media/projects.png)
+![Automations](docs/media/automations.png)
+
+## Demo
+
+Typing a follow-up in the offline demo. The reply quotes the message and points at provider setup.
+
+![Chat demo](docs/media/chat-demo.gif)
+
+A video of the same interaction: [chat-demo.mp4](docs/media/chat-demo.mp4).
+
 ## What it does
 
 | Area | What you get |
