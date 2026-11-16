@@ -4,7 +4,7 @@ import type { Page } from 'playwright'
 import { ProviderError, type ChatMessage, type ChatOptions, type Delta, type ModelInfo, type Provider, type ProviderStatus } from '../../types'
 import { sleep } from '../../util'
 import { str, type ProviderContext } from '../context'
-import { flattenConversation, followUpPrompt, latestUserText, parseEmulatedToolCalls } from '../emulated-tools'
+import { flattenConversation, followUpPrompt, latestUserText, parseEmulatedToolCalls, threadPrompt } from '../emulated-tools'
 import { BrowserMissingError, type ProfilePool } from './browser'
 import { isSiteDefaultModel, pickModelOption, webDefaultModel, webModelInfo } from './model'
 import { htmlToMarkdown, REPLY_SNAPSHOT_SOURCE } from './reply-markdown'
@@ -14,19 +14,41 @@ const REPLY_TIMEOUT_MS = 240_000
 const STABLE_MS = 2_000
 /** Some sites ignore clicks on the model picker until the page has finished starting up. */
 const MODEL_MENU_ATTEMPTS = 6
-/** A tab kept open for an agent run is closed after this long without a request, in case the run never ended cleanly. */
+/** A kept-open tab is closed after this long without a request, in case an agent run never ended cleanly. */
 const SESSION_IDLE_MS = 10 * 60_000
 
-/** A site tab that stays open between the steps of one agent run. `sent` counts the messages the site has already seen. */
+/** Errors that retrying on a fresh tab cannot fix: the user cancelled, or the site needs a human. */
+function isFinal(err: unknown): boolean {
+  return err instanceof ProviderError && (err.kind === 'aborted' || err.kind === 'captcha' || err.kind === 'not_logged_in')
+}
+
+/** Whether two page URLs are the same page, ignoring a trailing slash. */
+function sameUrl(a: string, b: string): boolean {
+  const trim = (u: string): string => u.replace(/\/+$/, '')
+  return trim(a) === trim(b)
+}
+
+/**
+ * A site tab that stays open between requests: the steps of one agent run, or the turns of one saved chat.
+ * `sent` counts the messages the site has already seen (agent runs) or the user turns it holds (saved chats).
+ */
 interface WebSession {
   page: Page
   sent: number
   timer?: NodeJS.Timeout
 }
 
+/** Where a saved chat's site conversation lives, so it can be reopened after its tab closed. */
+interface WebThread {
+  url: string
+  /** User turns the site conversation holds. */
+  sent: number
+}
+
 /**
  * Drives a logged-in chat website in a persistent Chromium profile.
- * Every request opens a new conversation, pastes the flattened prompt and reads the last reply as it grows.
+ * A request without a session opens a new conversation, pastes the flattened prompt and reads the last reply as it grows.
+ * A request with a session (an agent run, or a saved chat) keeps its site conversation and types only what is new.
  */
 export class WebChatProvider implements Provider {
   readonly kind = 'web' as const
@@ -39,6 +61,8 @@ export class WebChatProvider implements Provider {
   readonly description: string
   private connecting = false
   private readonly sessions = new Map<string, WebSession>()
+  /** Saved chats whose site conversation has its own URL. Outlives the tab, not the app. */
+  private readonly threads = new Map<string, WebThread>()
 
   constructor(
     private readonly siteId: string,
@@ -169,10 +193,14 @@ export class WebChatProvider implements Provider {
       wake?.()
     }
 
+    // A session id without tools is a saved chat (one site conversation per chat). With tools it is an agent run,
+    // which reuses its tab only when the full emulated-tool prompt is sent. Anything else is a one-off in its own tab.
+    const inThread = !!opts.sessionId && !opts.tools?.length
+    const inRun = !!opts.sessionId && !!opts.tools?.length && !plain
+
     const work = this.pool
       .withLock(this.siteId, () =>
-        // Plain-text sends and tool-less chats never reuse a tab; only agent runs with emulated tools do.
-        opts.sessionId && opts.tools?.length && !plain ? this.runInSession(site, messages, opts, push) : this.runConversation(site, prompt, opts, push)
+        inThread ? this.runInThread(site, messages, opts, push) : inRun ? this.runInSession(site, messages, opts, push) : this.runConversation(site, prompt, opts, push)
       )
       .then(
         (full) => {
@@ -271,8 +299,82 @@ export class WebChatProvider implements Provider {
     }
   }
 
-  /** Closes the tab kept open for an agent run. Called when the run ends, however it ends. */
+  /**
+   * One turn of a saved chat. The first turn opens a site chat; later turns type only the new message into the same tab.
+   * When the tab is gone, the saved conversation URL is reopened. When that is not possible either, a new site chat
+   * receives the earlier turns once so the model still has the thread.
+   */
+  private async runInThread(site: WebSiteConfig, messages: ChatMessage[], opts: ChatOptions, push: (d: Delta) => void): Promise<string> {
+    const sessionId = opts.sessionId!
+    const plain = this.ctx.settings().webPlainText
+    const users = messages.filter((m) => m.role === 'user').length
+    try {
+      // Reusing the profile context also cancels its idle-close timer while the chat is active.
+      await this.pool.context(this.siteId, { headless: this.headless(), channel: this.channel() })
+      let session = this.sessions.get(sessionId)
+      if (session && session.page.isClosed()) {
+        await this.dropSession(sessionId)
+        session = undefined
+      }
+
+      if (session) {
+        if (session.timer) clearTimeout(session.timer)
+        let produced = false
+        const track = (d: Delta): void => {
+          if (d.type === 'text') produced = true
+          push(d)
+        }
+        try {
+          const reply = await this.sendAndRead(session.page, site, threadPrompt(messages, { plain, known: session.sent }), opts, track)
+          this.finishTurn(sessionId, session, users, site)
+          return reply
+        } catch (err) {
+          if (opts.signal?.aborted || produced || isFinal(err)) throw err
+          // The tab went stale (closed, prompt box missing, no reply). Reopen the conversation below.
+          await this.dropSession(sessionId)
+          push({ type: 'status', message: `Reopening ${site.name}…` })
+        }
+      }
+
+      let page: Page | undefined
+      let known: number | undefined
+      const saved = this.threads.get(sessionId)
+      if (saved) {
+        try {
+          page = await this.openChat(site, opts, push, saved.url)
+          known = saved.sent
+        } catch (err) {
+          if (opts.signal?.aborted || isFinal(err)) throw err
+          this.threads.delete(sessionId)
+        }
+      }
+      page ??= await this.openChat(site, opts, push)
+      const fresh: WebSession = { page, sent: known ?? 0 }
+      // Register before sending so endSession can close the tab even if this request is cancelled.
+      this.sessions.set(sessionId, fresh)
+      const reply = await this.sendAndRead(page, site, threadPrompt(messages, { plain, known }), opts, push)
+      this.finishTurn(sessionId, fresh, users, site)
+      return reply
+    } catch (err) {
+      await this.dropSession(sessionId)
+      throw this.toProviderError(err, site)
+    } finally {
+      this.pool.release(this.siteId)
+    }
+  }
+
+  /** Records what the site conversation holds after a turn, and where it lives so a closed tab can be reopened. */
+  private finishTurn(sessionId: string, session: WebSession, users: number, site: WebSiteConfig): void {
+    session.sent = users
+    const url = session.page.isClosed() ? '' : session.page.url()
+    if (url && url !== 'about:blank' && !sameUrl(url, site.newChatUrl)) this.threads.set(sessionId, { url, sent: users })
+    else this.threads.delete(sessionId)
+    this.armSession(sessionId, session)
+  }
+
+  /** Releases the tab and the saved conversation of an agent run or a chat. Called when the run ends or the chat is deleted. */
   async endSession(sessionId: string): Promise<void> {
+    this.threads.delete(sessionId)
     await this.dropSession(sessionId)
   }
 
@@ -292,6 +394,8 @@ export class WebChatProvider implements Provider {
   }
 
   private async dropAllSessions(): Promise<void> {
+    // Signing in or out can change the account, so saved site conversations may no longer be reachable.
+    this.threads.clear()
     await Promise.all([...this.sessions.keys()].map((id) => this.dropSession(id)))
   }
 
@@ -301,13 +405,16 @@ export class WebChatProvider implements Provider {
     return new ProviderError(this.id, 'server', `${site.name} automation failed: ${err instanceof Error ? err.message : String(err)}`)
   }
 
-  /** Opens a new tab on a fresh chat, checks the login state and selects the configured model. */
-  private async openChat(site: WebSiteConfig, opts: ChatOptions, push: (d: Delta) => void): Promise<Page> {
+  /**
+   * Opens a new tab on a fresh chat, checks the login state and selects the configured model.
+   * With `resumeUrl` it opens that existing conversation instead and leaves its model as it was.
+   */
+  private async openChat(site: WebSiteConfig, opts: ChatOptions, push: (d: Delta) => void, resumeUrl?: string): Promise<Page> {
     push({ type: 'status', message: `Opening ${site.name}…` })
     const context = await this.pool.context(this.siteId, { headless: this.headless(), channel: this.channel() })
     const page = await context.newPage()
     try {
-      await page.goto(site.newChatUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 })
+      await page.goto(resumeUrl ?? site.newChatUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 })
       const state = await this.waitForState(page, site, 25_000)
       if (state === 'captcha') throw new ProviderError(this.id, 'captcha', `${site.name} is asking for a human check. Open Customize → Providers and click Connect to solve it.`)
       if (state === 'logged_out') {
@@ -317,7 +424,7 @@ export class WebChatProvider implements Provider {
       if (state !== 'ready') throw new ProviderError(this.id, 'unavailable', `Could not find the prompt box on ${site.name}. The site layout may have changed; edit its selectors in Customize.`)
 
       const wanted = opts.model ?? str(this.ctx.config().model)
-      if (!isSiteDefaultModel(wanted)) {
+      if (!resumeUrl && !isSiteDefaultModel(wanted)) {
         push({ type: 'status', message: `Selecting ${wanted} on ${site.name}…` })
         await this.selectModel(page, site, wanted!.trim())
       }

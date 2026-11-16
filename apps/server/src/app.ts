@@ -114,9 +114,12 @@ export function createApp(core: Core, cfg: ServerConfig, scheduler: Scheduler): 
     return chat ? c.json(chat) : bad(c, 'Chat not found', 404)
   })
 
-  app.delete('/api/chats/:id', (c) => {
-    running.get(c.req.param('id'))?.abort()
-    store.deleteChat(c.req.param('id'))
+  app.delete('/api/chats/:id', async (c) => {
+    const chatId = c.req.param('id')
+    running.get(chatId)?.abort()
+    // Closes the website conversation the chat kept open, so a deleted chat leaves no tab behind.
+    await core.registry.endSession(chatId)
+    store.deleteChat(chatId)
     return c.json({ ok: true })
   })
 

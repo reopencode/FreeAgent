@@ -1,6 +1,6 @@
 # FreeAgent
 
-A desktop AI agent in the style of Claude Desktop that does its work with the free AI you already have:
+A desktop AI agent that does its work with the free AI you already have:
 
 - **API keys:** OpenRouter and Google Gemini (AI Studio), plus any OpenAI-compatible endpoint you add as a custom API.
 - **Free web plans:** Grok, ChatGPT, Gemini, Claude, DeepSeek, Pi, Kimi and Z.ai, driven through a real browser that you sign in to once.
@@ -11,7 +11,6 @@ The left sidebar has **New chat**, **Automations**, **Projects** and **Customize
 FreeAgent also runs a local server, so other tools can use your free providers:
 
 - **Claude Code** can point at its Anthropic-compatible endpoint.
-- **Claude Desktop** loads it as an MCP server.
 - **Cursor, Continue, Aider and OpenCode** can use its OpenAI-compatible endpoint.
 
 ## Screenshots
@@ -51,7 +50,7 @@ A video of the same interaction: [chat-demo.mp4](docs/media/chat_demo.mp4).
 | Approvals | In Agent mode, writing files and running commands wait for **Allow** or **Deny**, unless you turn on auto-approve. |
 | Projects | Shared instructions, text files used as context, and a working folder for the agent and coding apps. |
 | Automations | Saved prompts that run on a cron schedule or on demand, with a stored run history. |
-| Customize | Provider keys (encrypted on disk), browser sign-ins, CSS selector overrides for the websites, provider order, MCP servers, Claude Desktop linking, gateway URLs, theme and agent settings. |
+| Customize | Provider keys (encrypted on disk), browser sign-ins, CSS selector overrides for the websites, provider order, MCP servers, gateway URLs, theme and agent settings. |
 
 ## Run it locally
 
@@ -106,7 +105,6 @@ If the desktop app finds a headless server already running on the same data fold
 | Grok, ChatGPT, Gemini (web), Claude (web), DeepSeek, Pi, Kimi, Z.ai | Run `pnpm browsers` once. Then click **Sign in**, log in in the window that opens, close it, and click **Check login**. ChatGPT can also work without an account once you have connected it; the other sites need a sign-in. Each site keeps its own browser profile in `<dataDir>/browser-profiles/`. These are **experimental**: sites change their markup and add bot checks. If replies stop arriving, edit the selectors under **Selectors**, or turn on **Show browser windows** to solve a captcha. Tool calls are emulated through text, so prefer API providers for Agent mode. To use a specific model on a site, type its name in **Model name** (for example `Argon` on Gemini, `Expert` on Grok, `Sonnet` or `Opus` on Claude). Before each chat FreeAgent opens the site's model menu and clicks the matching entry; if nothing matches, the error lists what the menu offers. Leave it empty to keep the site's current model. Pi has no model menu. |
 | OpenCode | Install it ([opencode.ai](https://opencode.ai/docs)) and run `opencode auth login` once. FreeAgent starts `opencode serve` and sends tasks to it in the project folder. |
 | Kiro | Install `kiro-cli`, then run `kiro-cli login` or paste a `KIRO_API_KEY`. Tasks run with `kiro-cli chat --no-interactive`. |
-| Claude Desktop | Claude Desktop connects to FreeAgent through MCP: see below. This is the app. **Claude (web)** in the website row above is your claude.ai browser account. |
 
 App providers aren't used for ordinary Auto chat. Use them by picking them directly, or let the agent call `delegate_to_app`.
 
@@ -130,15 +128,13 @@ Claude model names are mapped onto the router. Sonnet and Opus go to Auto · Cod
 
 `GET /v1/models` lists them all.
 
-**Claude Desktop:** click **Link Claude Desktop** in Integrations, then restart Claude Desktop. This adds a stdio MCP server entry to `claude_desktop_config.json`, and Claude gets these tools:
+**Any MCP client** can use streamable HTTP at `http://127.0.0.1:47821/mcp` with `Authorization: Bearer <token>`. It exposes these tools:
 
 - `list_providers`
 - `ask_provider` (ask any free model or website)
 - `run_automation`
 - `search_projects`
 - `delegate_to_app` (hand a coding task to OpenCode or Kiro)
-
-**Any MCP client** can use streamable HTTP at `http://127.0.0.1:47821/mcp` with `Authorization: Bearer <token>`.
 
 ## Telegram bot
 

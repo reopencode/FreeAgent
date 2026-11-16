@@ -73,6 +73,24 @@ export function followUpPrompt(newMessages: ChatMessage[], tools: ToolSpec[]): s
 }
 
 /**
+ * What to type for one turn of a saved chat that keeps a website conversation open.
+ * `known` is how many user turns the site thread already holds, or undefined when the thread is new to it
+ * (first turn, a restart, a lost tab, or a chat that earlier turns answered on another provider).
+ * Plain-text mode never sends instructions, but it does replay earlier turns once into a thread that lacks them.
+ */
+export function threadPrompt(messages: ChatMessage[], opts: { plain: boolean; known?: number }): string {
+  const users = messages.filter((m) => m.role === 'user').length
+  const latest = latestUserText(messages)
+  if (opts.known === undefined) {
+    if (users <= 1) return opts.plain && latest ? latest : flattenConversation(messages)
+    return flattenConversation(opts.plain ? messages.filter((m) => m.role !== 'system') : messages)
+  }
+  // The site holds every turn up to `known`; it only misses turns another provider answered in between.
+  if (!latest || (!opts.plain && users > opts.known + 1)) return flattenConversation(messages)
+  return latest
+}
+
+/**
  * Web chats start fresh each time, so the whole conversation is flattened into one prompt.
  * Tool results are written back as plain text the model can read.
  */

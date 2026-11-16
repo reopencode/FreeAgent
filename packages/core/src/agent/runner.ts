@@ -70,7 +70,9 @@ export class AgentRunner {
     const meta: MessageMeta = {}
     const attempts: RouteAttempt[] = []
     let text = ''
-    for await (const ev of this.deps.router.chat(input.messages, { target: input.target, signal: input.signal, cwd: input.cwd })) {
+    // A saved chat keeps one website conversation open across turns, so its id is the session id.
+    // The session ends when the chat is deleted (see DELETE /api/chats/:id), not when this turn finishes.
+    for await (const ev of this.deps.router.chat(input.messages, { target: input.target, signal: input.signal, cwd: input.cwd, sessionId: input.chatId })) {
       this.track(ev, input, meta, attempts)
       if (ev.type === 'route') text = ''
       if (ev.type === 'text') text = applyTextDelta(text, ev)
