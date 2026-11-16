@@ -108,6 +108,14 @@ If the desktop app finds a headless server already running on the same data fold
 
 App providers aren't used for ordinary Auto chat. Use them by picking them directly, or let the agent call `delegate_to_app`.
 
+## Free API sites
+
+Places to get a free API key:
+
+- [APINex](https://apinex.bond/?ref=YBAKBWB2)
+- [Abliteration](https://abliteration.ai/sign-up?referral_code=ref_x4J3UvbZPBQm)
+- [OneKey LLM API](https://onekeyllmapi.com/)
+
 ## Using FreeAgent from other tools
 
 **Customize → Integrations** shows your gateway URL, API key and ready-to-copy commands.
