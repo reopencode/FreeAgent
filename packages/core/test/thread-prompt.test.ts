@@ -47,4 +47,9 @@ describe('followUpPrompt', () => {
     expect(prompt).toContain('Tool result (fs_list):\nok')
     expect(prompt).toContain('Tools: fs_list')
   })
+
+  it('keeps the format reminder to one line instead of repeating the full block', () => {
+    const prompt = followUpPrompt([{ role: 'tool', content: 'ok', name: 'fs_list' }], [{ name: 'fs_list', description: 'List files', parameters: {} }])
+    expect(prompt).toBe('Tool result (fs_list):\nok\n\nContinue: call more tools with ```tool_call blocks as before, or give the final answer in normal text.\nTools: fs_list')
+  })
 })

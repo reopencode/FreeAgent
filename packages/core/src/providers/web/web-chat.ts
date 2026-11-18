@@ -1,10 +1,10 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Page } from 'playwright'
-import { ProviderError, type ChatMessage, type ChatOptions, type Delta, type ModelInfo, type Provider, type ProviderStatus } from '../../types'
+import { ProviderError, type ChatMessage, type ChatOptions, type Delta, type ModelInfo, type Provider, type ProviderStatus, type ToolSpec } from '../../types'
 import { sleep } from '../../util'
 import { str, type ProviderContext } from '../context'
-import { flattenConversation, followUpPrompt, latestUserText, parseEmulatedToolCalls, threadPrompt } from '../emulated-tools'
+import { flattenConversation, followUpPrompt, latestUserText, parseEmulatedToolCalls, repairPrompt, threadPrompt, type EmulatedToolCalls } from '../emulated-tools'
 import { BrowserMissingError, type ProfilePool } from './browser'
 import { isSiteDefaultModel, pickModelOption, webDefaultModel, webModelInfo } from './model'
 import { htmlToMarkdown, REPLY_SNAPSHOT_SOURCE } from './reply-markdown'
@@ -20,6 +20,13 @@ const SESSION_IDLE_MS = 10 * 60_000
 /** Errors that retrying on a fresh tab cannot fix: the user cancelled, or the site needs a human. */
 function isFinal(err: unknown): boolean {
   return err instanceof ProviderError && (err.kind === 'aborted' || err.kind === 'captcha' || err.kind === 'not_logged_in')
+}
+
+/** Swaps the shown reply for its prose, so tool blocks appear only as tool steps, then emits the calls. */
+function emitToolCalls(parsed: EmulatedToolCalls, push: (d: Delta) => void): void {
+  if (!parsed.calls.length) return
+  push({ type: 'text', text: parsed.text, replace: true })
+  for (const call of parsed.calls) push({ type: 'tool_call', call })
 }
 
 /** Whether two page URLs are the same page, ignoring a trailing slash. */
@@ -180,9 +187,11 @@ export class WebChatProvider implements Provider {
   }
 
   async *chat(messages: ChatMessage[], opts: ChatOptions): AsyncIterable<Delta> {
-    const plain = this.ctx.settings().webPlainText
+    const tools = opts.tools?.length ? opts.tools : undefined
+    // Tools only work through the full emulated-tool prompt, so plain-text mode applies to chat only.
+    const plain = this.ctx.settings().webPlainText && !tools
     const plainText = plain ? latestUserText(messages) : undefined
-    const prompt = plainText ?? flattenConversation(messages, plain ? undefined : opts.tools)
+    const prompt = plainText ?? flattenConversation(messages, tools)
     const site = this.site()
     const queue: Delta[] = []
     let finished = false
@@ -194,21 +203,21 @@ export class WebChatProvider implements Provider {
     }
 
     // A session id without tools is a saved chat (one site conversation per chat). With tools it is an agent run,
-    // which reuses its tab only when the full emulated-tool prompt is sent. Anything else is a one-off in its own tab.
-    const inThread = !!opts.sessionId && !opts.tools?.length
-    const inRun = !!opts.sessionId && !!opts.tools?.length && !plain
+    // which keeps one tab across its steps. Anything else is a one-off in its own tab.
+    const inThread = !!opts.sessionId && !tools
+    const inRun = !!opts.sessionId && !!tools
 
     const work = this.pool
-      .withLock(this.siteId, () =>
-        inThread ? this.runInThread(site, messages, opts, push) : inRun ? this.runInSession(site, messages, opts, push) : this.runConversation(site, prompt, opts, push)
-      )
+      .withLock(this.siteId, async () => {
+        if (inThread) await this.runInThread(site, messages, opts, push)
+        else if (inRun) await this.runInSession(site, messages, opts, push)
+        else {
+          const full = await this.runConversation(site, prompt, opts, push)
+          if (tools) emitToolCalls(parseEmulatedToolCalls(full, tools), push)
+        }
+      })
       .then(
-        (full) => {
-          if (!plain && opts.tools?.length) {
-            const { calls } = parseEmulatedToolCalls(full, opts.tools)
-            for (const call of calls) push({ type: 'tool_call', call })
-          }
-        },
+        () => undefined,
         (err) => {
           failure = err
         }
@@ -271,6 +280,7 @@ export class WebChatProvider implements Provider {
         try {
           const reply = await this.sendAndRead(session.page, site, followUpPrompt(messages.slice(session.sent), tools), opts, track)
           session.sent = messages.length
+          await this.readToolCalls(session.page, site, reply, tools, opts, track)
           this.armSession(sessionId, session)
           return reply
         } catch (err) {
@@ -289,6 +299,7 @@ export class WebChatProvider implements Provider {
       this.sessions.set(sessionId, fresh)
       const reply = await this.sendAndRead(page, site, flattenConversation(messages, tools), opts, push)
       fresh.sent = messages.length
+      await this.readToolCalls(page, site, reply, tools, opts, push)
       this.armSession(sessionId, fresh)
       return reply
     } catch (err) {
@@ -297,6 +308,20 @@ export class WebChatProvider implements Provider {
     } finally {
       this.pool.release(this.siteId)
     }
+  }
+
+  /**
+   * Emits the tool calls in an agent step's reply. When the reply holds a call that cannot be read, the site is asked
+   * once, in the same chat, to resend it; the broken reply is cleared so only the corrected one is shown.
+   */
+  private async readToolCalls(page: Page, site: WebSiteConfig, reply: string, tools: ToolSpec[], opts: ChatOptions, push: (d: Delta) => void): Promise<void> {
+    let parsed = parseEmulatedToolCalls(reply, tools)
+    if (!parsed.calls.length && parsed.malformed && !opts.signal?.aborted) {
+      push({ type: 'text', text: '', replace: true })
+      push({ type: 'status', message: `Asking ${site.name} to resend its tool call…` })
+      parsed = parseEmulatedToolCalls(await this.sendAndRead(page, site, repairPrompt(tools), opts, push), tools)
+    }
+    emitToolCalls(parsed, push)
   }
 
   /**

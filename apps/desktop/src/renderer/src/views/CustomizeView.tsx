@@ -708,7 +708,7 @@ function GeneralTab(): React.JSX.Element {
         <Row title="Show browser windows" hint="Show the browser while website providers work. Useful when a site needs a captcha.">
           <Switch checked={s.showBrowser} onCheckedChange={(v) => update.mutate({ showBrowser: v })} />
         </Row>
-        <Row title="Web chat: send message only" hint="Website providers keep one site conversation per chat and type just your latest message into it. Skips personal/project instructions and tools, and sends earlier turns only when a conversation has to be reopened.">
+        <Row title="Web chat: send message only" hint="Website providers keep one site conversation per chat and type just your latest message into it. Skips personal/project instructions, and sends earlier turns only when a conversation has to be reopened. Agent mode always sends the instructions and tools.">
           <Switch checked={s.webPlainText} onCheckedChange={(v) => update.mutate({ webPlainText: v })} />
         </Row>
         <Row title="Council size" hint="How many providers answer in Council mode.">

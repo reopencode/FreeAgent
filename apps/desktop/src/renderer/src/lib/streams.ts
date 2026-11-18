@@ -8,6 +8,8 @@ export interface LiveReply {
   userText: string
   userMessageId?: string
   content: string
+  /** Length of `content` when the current agent step began; a replacing text event only swaps what follows. */
+  stepBase?: number
   status?: string
   providerId?: string
   model?: string
@@ -48,14 +50,16 @@ function apply(r: LiveReply, ev: AgentEvent): LiveReply {
       const last = attempts[attempts.length - 1]
       if (last) attempts[attempts.length - 1] = { ...last, error: ev.error }
       // Nothing was shown from the failed provider, so its partial text (if any) is dropped.
-      return { ...r, attempts, content: r.steps.length ? r.content : '', status: `Switching from ${ev.providerId}…` }
+      return { ...r, attempts, content: r.steps.length ? r.content : '', stepBase: r.steps.length ? r.stepBase : 0, status: `Switching from ${ev.providerId}…` }
     }
     case 'text':
-      return { ...r, content: ev.replace ? ev.text : r.content + ev.text, status: undefined }
+      return { ...r, content: ev.replace ? r.content.slice(0, r.stepBase ?? 0) + ev.text : r.content + ev.text, status: undefined }
     case 'status':
       return { ...r, status: ev.message }
-    case 'step_start':
-      return ev.step > 0 && r.content && !r.content.endsWith('\n\n') ? { ...r, content: r.content + '\n\n' } : r
+    case 'step_start': {
+      const content = ev.step > 0 && r.content && !r.content.endsWith('\n\n') ? r.content + '\n\n' : r.content
+      return { ...r, content, stepBase: content.length }
+    }
     case 'tool_call':
       return { ...r, steps: [...r.steps, { id: ev.id, name: ev.name, args: ev.args, status: 'running' }], status: undefined }
     case 'approval_request':
