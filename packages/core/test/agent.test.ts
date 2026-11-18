@@ -95,6 +95,14 @@ describe('agent runs keep one provider session', () => {
     expect(probe.ended).toEqual([])
   })
 
+  it('runs agent turns of a saved chat in the chat session and keeps it open for the next turn', async () => {
+    const probe = new SessionProbe('probe')
+    addFake(core, probe, 1)
+    await core.runner.run({ messages: [{ role: 'user', content: 'list files' }], mode: 'agent', target: 'auto', cwd, chatId: 'chat_1', emit: () => undefined })
+    expect(probe.seen).toEqual(['chat_1', 'chat_1'])
+    expect(probe.ended).toEqual([])
+  })
+
   it('ends a chat session on every provider when the chat is deleted', async () => {
     const probe = new SessionProbe('probe')
     addFake(core, probe, 1)

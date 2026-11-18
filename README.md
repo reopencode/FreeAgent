@@ -208,7 +208,7 @@ Checked against the current app. Shipped behavior stays in the sections above.
 - [x] **Auto and a pinned model.** Auto, Auto · Code, Fast, Long context, Vision and Reasoning, or one provider, or `provider::model`.
 - [x] **Recent chats.** The sidebar groups them by day. A chat can be deleted. The title comes from the first message.
 - [x] **Offline demo.** Until a real provider is ready, the built-in demo answers so the window is usable.
-- [x] **One website thread per chat.** A saved chat keeps that site’s conversation open across turns. One agent run keeps one site conversation open across its steps.
+- [x] **One website thread per chat.** A saved chat keeps that site’s conversation open across turns, in Chat and Agent mode, so later turns type only the new message and later agent steps only the new tool results. A new site conversation gets a shortened prompt: up to 8K characters of project files, the last 10 earlier messages (2K characters each) and tool results cut to 6K characters.
 
 **Routing and limits**
 

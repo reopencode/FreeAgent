@@ -1,5 +1,5 @@
 import type { ChatMessage, JsonSchema, ToolCall, ToolSpec } from '../types'
-import { id } from '../util'
+import { id, truncate } from '../util'
 
 const FENCE_OPEN = /```([\w-]*)[ \t]*/
 const TAG = /<tool_call>([\s\S]*?)<\/tool_call>/g
@@ -7,6 +7,22 @@ const TAG = /<tool_call>([\s\S]*?)<\/tool_call>/g
 const TOOL_LANGS = new Set(['tool_call', 'tool', 'tool_code'])
 const ARG_KEYS = ['arguments', 'args', 'parameters', 'input'] as const
 const PARAM_HINT_MAX = 80
+const TOOL_DESCRIPTION_MAX = 160
+
+/**
+ * Size limits for text typed into a chat website. Sites cap or reject long input (some turn it into an attachment),
+ * and typing a long prompt is slow, so web prompts carry less context than API requests.
+ */
+export const WEB_LIMITS = {
+  /** Total characters of project file contents in the instructions. */
+  files: 8_000,
+  /** Earlier messages kept before the latest user message. */
+  historyMessages: 10,
+  /** Characters kept of each earlier message. */
+  historyMessage: 2_000,
+  /** Characters kept of each tool result. */
+  toolResult: 6_000
+}
 
 const FORMAT = ['```tool_call', '{"name": "<tool name>", "arguments": { ... }}', '```'].join('\n')
 
@@ -39,7 +55,8 @@ export function toolSignature(tool: ToolSpec): string {
     const hint = typeof schema.description === 'string' && !isNested(schema) ? oneLine(schema.description) : ''
     return hint ? `${label} (${hint.length > PARAM_HINT_MAX ? `${hint.slice(0, PARAM_HINT_MAX - 1)}…` : hint})` : label
   })
-  const description = oneLine(tool.description ?? '')
+  const full = oneLine(tool.description ?? '')
+  const description = full.length > TOOL_DESCRIPTION_MAX ? `${full.slice(0, TOOL_DESCRIPTION_MAX - 1)}…` : full
   return `${tool.name}(${params.join(', ')})${description ? ` - ${description}` : ''}`
 }
 
@@ -238,11 +255,40 @@ export function latestUserText(messages: ChatMessage[]): string | undefined {
 export function followUpPrompt(newMessages: ChatMessage[], tools: ToolSpec[]): string {
   const lines: string[] = []
   for (const m of newMessages) {
-    if (m.role === 'tool') lines.push(`Tool result (${m.name ?? 'tool'}):\n${m.content}`)
+    if (m.role === 'tool') lines.push(`Tool result (${m.name ?? 'tool'}):\n${truncate(m.content, WEB_LIMITS.toolResult)}`)
     else if (m.role === 'user') lines.push(`User: ${m.content}`)
   }
   lines.push(`Continue: call more tools with \`\`\`tool_call blocks as before, or give the final answer in normal text.\nTools: ${tools.map((t) => t.name).join(', ')}`)
   return lines.join('\n\n')
+}
+
+/** What a site conversation already holds, so a later agent turn or step types only what is new. */
+export interface SiteThread {
+  /** User turns the site conversation holds. */
+  users: number
+  /** Whether the tool instructions were sent into it. */
+  tools: boolean
+  /** Messages of the current agent run the site has seen, once a step of that run was answered. */
+  runSent?: number
+}
+
+/**
+ * What to type for one step of an agent run. `known` is undefined when the site conversation is new.
+ * A step that continues the run sends only the new tool results. A new turn in a site conversation that holds
+ * every earlier turn sends only the new user message, plus the tool instructions if that conversation never had them.
+ */
+export function agentPrompt(messages: ChatMessage[], tools: ToolSpec[], known?: SiteThread): string {
+  if (!known) return flattenConversation(messages, tools)
+  const last = messages[messages.length - 1]
+  if (last?.role !== 'user') {
+    if (known.runSent === undefined || known.runSent > messages.length) return flattenConversation(messages, tools)
+    return followUpPrompt(messages.slice(known.runSent), tools)
+  }
+  const users = messages.filter((m) => m.role === 'user').length
+  // The site misses turns another provider answered in between, so it gets the whole conversation once.
+  if (users !== known.users + 1) return flattenConversation(messages, tools)
+  const prompt = followUpPrompt([last], tools)
+  return known.tools ? prompt : `[Tools]\n${toolInstructions(tools)}\n\n${prompt}`
 }
 
 /**
@@ -263,15 +309,45 @@ export function threadPrompt(messages: ChatMessage[], opts: { plain: boolean; kn
   return latest
 }
 
+/** Cuts the project files in the instructions down to `WEB_LIMITS.files` characters in total. */
+function compactFiles(system: string): string {
+  let budget = WEB_LIMITS.files
+  return system.replace(/<file name="([^"]*)">\n([\s\S]*?)\n<\/file>/g, (_match, name: string, body: string) => {
+    if (budget <= 0) return `<file name="${name}">(left out to keep the message short)</file>`
+    const kept = truncate(body, budget)
+    budget -= Math.min(body.length, budget)
+    return `<file name="${name}">\n${kept}\n</file>`
+  })
+}
+
 /**
- * Web chats start fresh each time, so the whole conversation is flattened into one prompt.
+ * Keeps the latest user message and everything after it (the current agent run) in full, apart from long tool results.
+ * Earlier turns are limited to the last few messages, each shortened.
+ */
+function compactTurns(turns: ChatMessage[]): { turns: ChatMessage[]; omitted: number } {
+  const lastUser = Math.max(turns.map((m) => m.role).lastIndexOf('user'), 0)
+  const earlier = turns.slice(0, lastUser)
+  const kept = earlier.slice(-WEB_LIMITS.historyMessages)
+  const shorten = (m: ChatMessage, max: number): ChatMessage => (m.content.length > max ? { ...m, content: truncate(m.content, max) } : m)
+  return {
+    turns: [
+      ...kept.map((m) => shorten(m, m.role === 'tool' ? WEB_LIMITS.toolResult : WEB_LIMITS.historyMessage)),
+      ...turns.slice(lastUser).map((m) => (m.role === 'tool' ? shorten(m, WEB_LIMITS.toolResult) : m))
+    ],
+    omitted: earlier.length - kept.length
+  }
+}
+
+/**
+ * Web chats start fresh each time, so the whole conversation is flattened into one prompt, within `WEB_LIMITS`.
  * Tool results are written back as plain text the model can read.
  */
 export function flattenConversation(messages: ChatMessage[], tools?: ToolSpec[]): string {
-  const system = messages.filter((m) => m.role === 'system').map((m) => m.content)
-  const turns = messages.filter((m) => m.role !== 'system')
-  if (!tools?.length && system.length === 0 && turns.length === 1 && turns[0].role === 'user') return turns[0].content
+  const system = messages.filter((m) => m.role === 'system').map((m) => compactFiles(m.content))
+  const all = messages.filter((m) => m.role !== 'system')
+  if (!tools?.length && system.length === 0 && all.length === 1 && all[0].role === 'user') return all[0].content
 
+  const { turns, omitted } = compactTurns(all)
   const parts: string[] = []
   if (system.length) parts.push(`[Instructions]\n${system.join('\n\n')}`)
   if (tools?.length) parts.push(`[Tools]\n${toolInstructions(tools)}`)
@@ -281,6 +357,7 @@ export function flattenConversation(messages: ChatMessage[], tools?: ToolSpec[])
     const calls = (m.toolCalls ?? []).map((c) => `\`\`\`tool_call\n{"name": "${c.name}", "arguments": ${c.arguments || '{}'}}\n\`\`\``)
     return `Assistant: ${[m.content, ...calls].filter(Boolean).join('\n')}`
   })
+  if (omitted) lines.unshift(`(${omitted} earlier messages left out)`)
   parts.push(`[Conversation]\n${lines.join('\n\n')}`)
   parts.push('Continue the conversation as the Assistant. Reply to the latest message only.')
   return parts.join('\n\n')

@@ -92,7 +92,8 @@ export class AgentRunner {
     let target = input.target
     let finalText = ''
     // One id for the whole run lets web providers keep a single site conversation open across steps.
-    const sessionId = id('run_')
+    // A saved chat uses its own id, so its agent turns continue that conversation; the chat's deletion ends it.
+    const sessionId = input.chatId ?? id('run_')
 
     try {
       for (let step = 0; step < maxSteps; step++) {
@@ -124,7 +125,7 @@ export class AgentRunner {
         }
       }
     } finally {
-      await this.deps.registry.endSession(sessionId)
+      if (!input.chatId) await this.deps.registry.endSession(sessionId)
     }
     meta.attempts = attempts
     return { text: finalText, meta }

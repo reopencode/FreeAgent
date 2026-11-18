@@ -4,7 +4,7 @@ import type { Page } from 'playwright'
 import { ProviderError, type ChatMessage, type ChatOptions, type Delta, type ModelInfo, type Provider, type ProviderStatus, type ToolSpec } from '../../types'
 import { sleep } from '../../util'
 import { str, type ProviderContext } from '../context'
-import { flattenConversation, followUpPrompt, latestUserText, parseEmulatedToolCalls, repairPrompt, threadPrompt, type EmulatedToolCalls } from '../emulated-tools'
+import { agentPrompt, flattenConversation, latestUserText, parseEmulatedToolCalls, repairPrompt, threadPrompt, type EmulatedToolCalls, type SiteThread } from '../emulated-tools'
 import { BrowserMissingError, type ProfilePool } from './browser'
 import { isSiteDefaultModel, pickModelOption, webDefaultModel, webModelInfo } from './model'
 import { htmlToMarkdown, REPLY_SNAPSHOT_SOURCE } from './reply-markdown'
@@ -36,20 +36,18 @@ function sameUrl(a: string, b: string): boolean {
 }
 
 /**
- * A site tab that stays open between requests: the steps of one agent run, or the turns of one saved chat.
- * `sent` counts the messages the site has already seen (agent runs) or the user turns it holds (saved chats).
+ * A site tab that stays open between requests: the turns of one saved chat, in Chat or Agent mode, and the steps
+ * of its agent runs. `known` is what the site conversation already holds.
  */
 interface WebSession {
   page: Page
-  sent: number
+  known: SiteThread
   timer?: NodeJS.Timeout
 }
 
-/** Where a saved chat's site conversation lives, so it can be reopened after its tab closed. */
-interface WebThread {
+/** Where a saved chat's site conversation lives and what it holds, so it can be reopened after its tab closed. */
+interface WebThread extends SiteThread {
   url: string
-  /** User turns the site conversation holds. */
-  sent: number
 }
 
 /**
@@ -255,59 +253,79 @@ export class WebChatProvider implements Provider {
   }
 
   /**
-   * One request of an agent run. The first call opens a chat and sends the whole conversation; later calls
-   * type only the new tool results into the same tab. If the tab is gone or fails, it starts over on a new chat.
+   * One step of an agent run. A saved chat's agent turns share its site conversation, so a new turn types only the
+   * new message and later steps type only the new tool results. A new site chat gets the whole (compacted) conversation.
    */
   private async runInSession(site: WebSiteConfig, messages: ChatMessage[], opts: ChatOptions, push: (d: Delta) => void): Promise<string> {
     const sessionId = opts.sessionId!
     const tools = opts.tools!
+    const users = messages.filter((m) => m.role === 'user').length
+    const finish = async (session: WebSession, reply: string, emit: (d: Delta) => void): Promise<string> => {
+      session.known = { users, tools: true, runSent: messages.length }
+      await this.readToolCalls(session.page, site, reply, tools, opts, emit)
+      this.saveThread(sessionId, session, site)
+      return reply
+    }
     try {
       // Reusing the profile context also cancels its idle-close timer while the run is active.
       await this.pool.context(this.siteId, { headless: this.headless(), channel: this.channel() })
-      let session = this.sessions.get(sessionId)
-      if (session && session.page.isClosed()) {
-        await this.dropSession(sessionId)
-        session = undefined
-      }
-
+      const session = await this.liveSession(sessionId)
       if (session) {
-        if (session.timer) clearTimeout(session.timer)
         let produced = false
         const track = (d: Delta): void => {
           if (d.type === 'text') produced = true
           push(d)
         }
         try {
-          const reply = await this.sendAndRead(session.page, site, followUpPrompt(messages.slice(session.sent), tools), opts, track)
-          session.sent = messages.length
-          await this.readToolCalls(session.page, site, reply, tools, opts, track)
-          this.armSession(sessionId, session)
-          return reply
+          const reply = await this.sendAndRead(session.page, site, agentPrompt(messages, tools, session.known), opts, track)
+          return await finish(session, reply, track)
         } catch (err) {
-          const kind = err instanceof ProviderError ? err.kind : undefined
-          const final = opts.signal?.aborted || produced || kind === 'aborted' || kind === 'captcha' || kind === 'not_logged_in'
-          if (final) throw err
-          // The tab went stale (closed, prompt box missing, no reply). Start over with the full conversation.
+          if (opts.signal?.aborted || produced || isFinal(err)) throw err
+          // The tab went stale (closed, prompt box missing, no reply). Reopen the conversation below.
           await this.dropSession(sessionId)
           push({ type: 'status', message: `Reopening ${site.name}…` })
         }
       }
 
-      const page = await this.openChat(site, opts, push)
-      const fresh: WebSession = { page, sent: 0 }
+      const { page, known } = await this.reopen(sessionId, site, opts, push)
+      const fresh: WebSession = { page, known: known ?? { users: 0, tools: false } }
       // Register before sending so endSession can close the tab even if this request is cancelled.
       this.sessions.set(sessionId, fresh)
-      const reply = await this.sendAndRead(page, site, flattenConversation(messages, tools), opts, push)
-      fresh.sent = messages.length
-      await this.readToolCalls(page, site, reply, tools, opts, push)
-      this.armSession(sessionId, fresh)
-      return reply
+      const reply = await this.sendAndRead(page, site, agentPrompt(messages, tools, known), opts, push)
+      return await finish(fresh, reply, push)
     } catch (err) {
       await this.dropSession(sessionId)
       throw this.toProviderError(err, site)
     } finally {
       this.pool.release(this.siteId)
     }
+  }
+
+  /** The open tab of a session, with its idle timer stopped while a request uses it. Drops a tab that was closed. */
+  private async liveSession(sessionId: string): Promise<WebSession | undefined> {
+    const session = this.sessions.get(sessionId)
+    if (!session) return undefined
+    if (session.page.isClosed()) {
+      await this.dropSession(sessionId)
+      return undefined
+    }
+    if (session.timer) clearTimeout(session.timer)
+    return session
+  }
+
+  /** Reopens the saved site conversation of a session, or opens a new site chat when there is none or it fails to load. */
+  private async reopen(sessionId: string, site: WebSiteConfig, opts: ChatOptions, push: (d: Delta) => void): Promise<{ page: Page; known?: SiteThread }> {
+    const saved = this.threads.get(sessionId)
+    if (saved) {
+      try {
+        const page = await this.openChat(site, opts, push, saved.url)
+        return { page, known: { users: saved.users, tools: saved.tools, runSent: saved.runSent } }
+      } catch (err) {
+        if (opts.signal?.aborted || isFinal(err)) throw err
+        this.threads.delete(sessionId)
+      }
+    }
+    return { page: await this.openChat(site, opts, push) }
   }
 
   /**
@@ -333,26 +351,24 @@ export class WebChatProvider implements Provider {
     const sessionId = opts.sessionId!
     const plain = this.ctx.settings().webPlainText
     const users = messages.filter((m) => m.role === 'user').length
+    const finish = (session: WebSession, reply: string): string => {
+      session.known = { users, tools: session.known.tools }
+      this.saveThread(sessionId, session, site)
+      return reply
+    }
     try {
       // Reusing the profile context also cancels its idle-close timer while the chat is active.
       await this.pool.context(this.siteId, { headless: this.headless(), channel: this.channel() })
-      let session = this.sessions.get(sessionId)
-      if (session && session.page.isClosed()) {
-        await this.dropSession(sessionId)
-        session = undefined
-      }
-
+      const session = await this.liveSession(sessionId)
       if (session) {
-        if (session.timer) clearTimeout(session.timer)
         let produced = false
         const track = (d: Delta): void => {
           if (d.type === 'text') produced = true
           push(d)
         }
         try {
-          const reply = await this.sendAndRead(session.page, site, threadPrompt(messages, { plain, known: session.sent }), opts, track)
-          this.finishTurn(sessionId, session, users, site)
-          return reply
+          const reply = await this.sendAndRead(session.page, site, threadPrompt(messages, { plain, known: session.known.users }), opts, track)
+          return finish(session, reply)
         } catch (err) {
           if (opts.signal?.aborted || produced || isFinal(err)) throw err
           // The tab went stale (closed, prompt box missing, no reply). Reopen the conversation below.
@@ -361,25 +377,12 @@ export class WebChatProvider implements Provider {
         }
       }
 
-      let page: Page | undefined
-      let known: number | undefined
-      const saved = this.threads.get(sessionId)
-      if (saved) {
-        try {
-          page = await this.openChat(site, opts, push, saved.url)
-          known = saved.sent
-        } catch (err) {
-          if (opts.signal?.aborted || isFinal(err)) throw err
-          this.threads.delete(sessionId)
-        }
-      }
-      page ??= await this.openChat(site, opts, push)
-      const fresh: WebSession = { page, sent: known ?? 0 }
+      const { page, known } = await this.reopen(sessionId, site, opts, push)
+      const fresh: WebSession = { page, known: known ?? { users: 0, tools: false } }
       // Register before sending so endSession can close the tab even if this request is cancelled.
       this.sessions.set(sessionId, fresh)
-      const reply = await this.sendAndRead(page, site, threadPrompt(messages, { plain, known }), opts, push)
-      this.finishTurn(sessionId, fresh, users, site)
-      return reply
+      const reply = await this.sendAndRead(page, site, threadPrompt(messages, { plain, known: known?.users }), opts, push)
+      return finish(fresh, reply)
     } catch (err) {
       await this.dropSession(sessionId)
       throw this.toProviderError(err, site)
@@ -388,11 +391,10 @@ export class WebChatProvider implements Provider {
     }
   }
 
-  /** Records what the site conversation holds after a turn, and where it lives so a closed tab can be reopened. */
-  private finishTurn(sessionId: string, session: WebSession, users: number, site: WebSiteConfig): void {
-    session.sent = users
+  /** Remembers where the site conversation lives and what it holds, so a closed tab can be reopened. */
+  private saveThread(sessionId: string, session: WebSession, site: WebSiteConfig): void {
     const url = session.page.isClosed() ? '' : session.page.url()
-    if (url && url !== 'about:blank' && !sameUrl(url, site.newChatUrl)) this.threads.set(sessionId, { url, sent: users })
+    if (url && url !== 'about:blank' && !sameUrl(url, site.newChatUrl)) this.threads.set(sessionId, { url, ...session.known })
     else this.threads.delete(sessionId)
     this.armSession(sessionId, session)
   }

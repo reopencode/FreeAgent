@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { flattenConversation, parseEmulatedToolCalls, repairPrompt, toolInstructions, toolSignature } from '../src/providers/emulated-tools'
-import type { ToolSpec } from '../src/types'
+import { agentPrompt, flattenConversation, parseEmulatedToolCalls, repairPrompt, toolInstructions, toolSignature, WEB_LIMITS } from '../src/providers/emulated-tools'
+import type { ChatMessage, ToolSpec } from '../src/types'
 
 const tools: ToolSpec[] = [
   { name: 'fs_read', description: 'Read a file', parameters: { type: 'object', properties: { path: { type: 'string' } }, required: ['path'] } },
@@ -45,8 +45,69 @@ describe('toolSignature and toolInstructions', () => {
     expect(flattenConversation([{ role: 'user', content: 'hi' }], tools)).toContain('[Tools]')
   })
 
+  it('shortens long tool descriptions such as MCP ones', () => {
+    const sig = toolSignature({ name: 'mcp_x', description: 'word '.repeat(100), parameters: {} })
+    expect(sig.length).toBeLessThan(200)
+    expect(sig.endsWith('…')).toBe(true)
+  })
+
   it('repairPrompt names the valid tools', () => {
     expect(repairPrompt(tools)).toContain('Valid tool names: fs_read, fs_write, run_code')
+  })
+})
+
+const sys = (content: string): ChatMessage => ({ role: 'system', content })
+const user = (content: string): ChatMessage => ({ role: 'user', content })
+const bot = (content: string): ChatMessage => ({ role: 'assistant', content })
+const result = (content: string): ChatMessage => ({ role: 'tool', name: 'fs_read', content })
+
+describe('web prompt size', () => {
+  it('keeps project files within the web budget', () => {
+    const big = 'x'.repeat(WEB_LIMITS.files + 5_000)
+    const flat = flattenConversation([sys(`Project files:\n<file name="a.txt">\n${big}\n</file>\n<file name="b.txt">\nsecond\n</file>`), user('hi')], tools)
+    expect(flat.length).toBeLessThan(WEB_LIMITS.files + 3_000)
+    expect(flat).toContain('<file name="b.txt">(left out to keep the message short)</file>')
+  })
+
+  it('keeps the last few earlier messages, shortened, and the current turn in full', () => {
+    const history = Array.from({ length: 30 }, (_, i) => (i % 2 ? bot(`reply ${i} ${'y'.repeat(5_000)}`) : user(`ask ${i}`)))
+    const latest = `now ${'z'.repeat(5_000)}`
+    const flat = flattenConversation([...history, user(latest), result('r'.repeat(20_000))], tools)
+    expect(flat).toContain(`(${30 - WEB_LIMITS.historyMessages} earlier messages left out)`)
+    expect(flat).not.toContain('ask 0')
+    expect(flat).toContain('ask 28')
+    expect(flat).not.toContain('y'.repeat(WEB_LIMITS.historyMessage + 1))
+    expect(flat).toContain(latest)
+    expect(flat).not.toContain('r'.repeat(WEB_LIMITS.toolResult + 1))
+  })
+})
+
+describe('agentPrompt', () => {
+  const turn1 = [sys('Be brief.'), user('one')]
+
+  it('sends the whole conversation into a new site chat', () => {
+    expect(agentPrompt(turn1, tools)).toContain('[Tools]')
+  })
+
+  it('sends only new tool results on a later step of the run', () => {
+    const step2 = [...turn1, { role: 'assistant' as const, content: '', toolCalls: [{ id: 'c', name: 'fs_read', arguments: '{}' }] }, result('body')]
+    const prompt = agentPrompt(step2, tools, { users: 1, tools: true, runSent: turn1.length })
+    expect(prompt).toContain('Tool result (fs_read):\nbody')
+    expect(prompt).not.toContain('Be brief.')
+    expect(prompt).not.toContain('User: one')
+  })
+
+  it('sends only the new message on a new turn of a conversation that holds the earlier ones', () => {
+    const turn2 = [...turn1, bot('r1'), user('two')]
+    const prompt = agentPrompt(turn2, tools, { users: 1, tools: true, runSent: 9 })
+    expect(prompt.startsWith('User: two')).toBe(true)
+    expect(prompt).not.toContain('[Tools]')
+    expect(agentPrompt(turn2, tools, { users: 1, tools: false })).toContain('[Tools]')
+  })
+
+  it('catches the site up when it misses turns', () => {
+    const turn3 = [...turn1, bot('r1'), user('two'), bot('r2'), user('three')]
+    expect(agentPrompt(turn3, tools, { users: 1, tools: true })).toContain('User: two')
   })
 })
 
