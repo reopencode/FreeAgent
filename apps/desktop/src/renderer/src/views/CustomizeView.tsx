@@ -108,7 +108,7 @@ function SiteConfigDialog({ provider, open, onOpenChange }: { provider: Provider
         <DialogHeader>
           <DialogTitle>{provider.name} page selectors</DialogTitle>
           <DialogDescription>
-            Websites change their markup. If sending or reading replies breaks, fix the CSS selectors here. {overridden ? 'You are using a custom copy.' : 'These are the built-in defaults.'}
+            Websites change their markup. If sending or reading replies breaks, fix the CSS selectors here. If a popup keeps covering the chat box, put its close button&apos;s selector in <code>dismiss</code>. {overridden ? 'You are using a custom copy.' : 'These are the built-in defaults.'}
           </DialogDescription>
         </DialogHeader>
         <Textarea value={text} onChange={(e) => setText(e.target.value)} rows={16} className="font-mono text-xs" spellCheck={false} />
@@ -705,7 +705,7 @@ function GeneralTab(): React.JSX.Element {
         <Row title="Fall back from a chosen provider" hint="If the provider you picked fails, try the next one instead of stopping.">
           <Switch checked={s.fallbackOnExplicit} onCheckedChange={(v) => update.mutate({ fallbackOnExplicit: v })} />
         </Row>
-        <Row title="Show browser windows" hint="Show the browser while website providers work. Useful when a site needs a captcha.">
+        <Row title="Show browser windows" hint="Show the browser while website providers work. When off, a window still opens by itself if a site asks for a human check.">
           <Switch checked={s.showBrowser} onCheckedChange={(v) => update.mutate({ showBrowser: v })} />
         </Row>
         <Row title="Web chat: send message only" hint="Website providers keep one site conversation per chat and type just your latest message into it. Skips personal/project instructions, and sends earlier turns only when a conversation has to be reopened. Agent mode always sends the instructions and tools.">

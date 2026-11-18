@@ -21,12 +21,24 @@ export interface WebSiteConfig {
   generating?: string
   /** Shown when the site asks for a human check. */
   captcha?: string
+  /** Clickable close / accept / "maybe later" control of a popup that covers the page. Clicked whenever it appears. */
+  dismiss?: string
   loginRequired: boolean
   /** Button that opens the site's model menu. Without it, a Model name cannot be applied. */
   modelPicker?: string
   /** The entries of the open model menu. Each entry's text is matched against the Model name. */
   modelOption?: string
 }
+
+/** Cookie banners and generic modal close buttons, dismissed on every site in addition to its own `dismiss`. */
+export const GENERIC_DISMISS = [
+  '#onetrust-accept-btn-handler',
+  'button#L2AGLb',
+  '[role="dialog"] button:has-text("Accept all")',
+  '[role="dialog"] button:has-text("Reject all")',
+  // Only true modals: popover menus (e.g. model pickers) also use role="dialog" and must stay open.
+  '[aria-modal="true"] button[aria-label="Close"]'
+].join(', ')
 
 export const WEB_SITES: WebSiteConfig[] = [
   {
@@ -56,6 +68,8 @@ export const WEB_SITES: WebSiteConfig[] = [
     reply: '[data-markdown-text-style="assistant-message"], [data-message-author-role="assistant"], [data-message-role="assistant"]',
     generating: '[data-testid="stop-button"], button[aria-label="Stop generating"], button[aria-label="Stop"]',
     captcha: 'iframe[src*="challenges.cloudflare.com"], iframe[src*="challenge-platform"], #challenge-form, .cf-turnstile',
+    // Signed-out visitors get a "log in or stay logged out" modal after the first reply.
+    dismiss: 'a:has-text("Stay logged out"), button:has-text("Stay logged out")',
     loginRequired: false,
     // Not checked against the live site (it sits behind a human check when signed out); adjust under Selectors if needed.
     modelPicker: '[data-testid="model-switcher-dropdown-button"], button[aria-label^="Model selector"]',
@@ -73,6 +87,8 @@ export const WEB_SITES: WebSiteConfig[] = [
     requireSendClick: true,
     reply: 'model-response message-content, message-content, message-content.model-response-text, model-response',
     generating: 'button[aria-label*="Stop"]',
+    // Feature announcements and the Google consent screen. Not checked against every rollout; adjust under Selectors if needed.
+    dismiss: '[role="dialog"] button:has-text("No thanks"), [role="dialog"] button:has-text("Got it"), form[action*="consent.google"] button:has-text("Accept all")',
     loginRequired: true,
     modelPicker: '[data-test-id="bard-mode-menu-button"], button[aria-label^="Open mode picker"]',
     modelOption: '[role="menuitemradio"]'
@@ -171,7 +187,7 @@ export function siteOverridePath(dataDir: string, siteId: string): string {
 
 export function validateSiteConfig(cfg: Partial<WebSiteConfig>): string[] {
   const errors: string[] = []
-  for (const key of ['url', 'newChatUrl', 'input', 'reply', 'modelPicker', 'modelOption'] as const) {
+  for (const key of ['url', 'newChatUrl', 'input', 'reply', 'modelPicker', 'modelOption', 'dismiss'] as const) {
     if (cfg[key] !== undefined && (typeof cfg[key] !== 'string' || !String(cfg[key]).trim())) errors.push(`${key} must be a non-empty string`)
   }
   for (const key of ['url', 'newChatUrl'] as const) {

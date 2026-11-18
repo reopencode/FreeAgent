@@ -26,6 +26,35 @@ function wrapLaunchError(err: unknown): Error {
   return err instanceof Error ? err : new Error(msg)
 }
 
+const userAgents = new Map<string, Promise<string | undefined>>()
+
+/**
+ * The browser's own user agent without the "Headless" marker. Headless and visible windows of a profile must send the
+ * same one, or the clearance cookie a site sets after a human check in a visible window is rejected by the next headless request.
+ */
+function sharedUserAgent(channel?: string): Promise<string | undefined> {
+  const key = channel || 'chromium'
+  let ua = userAgents.get(key)
+  if (!ua) {
+    ua = (async () => {
+      const { chromium } = await loadPlaywright()
+      const browser = await chromium.launch({ headless: true, channel: channel || undefined })
+      try {
+        const page = await browser.newPage()
+        return (await page.evaluate(() => navigator.userAgent)).replace(/HeadlessChrome/g, 'Chrome')
+      } finally {
+        await browser.close().catch(() => undefined)
+      }
+    })().catch(() => {
+      // Not cached, so it is read again once the browser is installed.
+      userAgents.delete(key)
+      return undefined
+    })
+    userAgents.set(key, ua)
+  }
+  return ua
+}
+
 /** One persistent Chromium profile per web site, so logins survive restarts. */
 export class ProfilePool {
   private contexts = new Map<string, { ctx: BrowserContext; headless: boolean; idle?: NodeJS.Timeout }>()
@@ -52,6 +81,7 @@ export class ProfilePool {
       ctx = await chromium.launchPersistentContext(this.profileDir(siteId), {
         headless: opts.headless,
         channel: opts.channel || undefined,
+        userAgent: await sharedUserAgent(opts.channel),
         viewport: { width: 1280, height: 900 },
         args: ['--disable-blink-features=AutomationControlled', '--no-first-run', '--no-default-browser-check']
       })

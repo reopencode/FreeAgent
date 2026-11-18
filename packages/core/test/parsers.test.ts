@@ -8,7 +8,7 @@ import { cleanKiroLine } from '../src/providers/apps/kiro'
 import { flattenConversation, followUpPrompt, latestUserText, parseEmulatedToolCalls } from '../src/providers/emulated-tools'
 import { cleanSchema, toGeminiRequest } from '../src/providers/gemini'
 import { toOpenAIMessages } from '../src/providers/openai-compatible'
-import { loadSiteConfig, siteOverridePath, validateSiteConfig, WEB_SITES } from '../src/providers/web/sites'
+import { GENERIC_DISMISS, loadSiteConfig, siteOverridePath, validateSiteConfig, WEB_SITES } from '../src/providers/web/sites'
 import type { ToolSpec } from '../src/types'
 
 const tools: ToolSpec[] = [{ name: 'fs_read', description: 'Read a file', parameters: { type: 'object', properties: { path: { type: 'string' } } } }]
@@ -106,6 +106,24 @@ describe('web site selector config', () => {
       const cfg = loadSiteConfig(dir, 'grok')
       expect(cfg.input).toBe('textarea.custom')
       expect(cfg.url).toBe(WEB_SITES.find((s) => s.id === 'grok')!.url)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('accepts popup dismiss selectors and lets users override them', () => {
+    expect(validateSiteConfig({ dismiss: '' })).toHaveLength(1)
+    expect(validateSiteConfig({ dismiss: 'button.close' })).toEqual([])
+    expect(GENERIC_DISMISS).toMatch(/onetrust-accept-btn-handler/)
+    expect(GENERIC_DISMISS).not.toMatch(/(^|, )\[role="dialog"\] button\[aria-label="Close"\]/)
+    expect(WEB_SITES.find((s) => s.id === 'chatgpt')!.dismiss).toMatch(/Stay logged out/)
+    const dir = mkdtempSync(join(tmpdir(), 'freeagent-sites-'))
+    try {
+      mkdirSync(join(dir, 'web-sites'), { recursive: true })
+      writeFileSync(siteOverridePath(dir, 'kimi'), JSON.stringify({ dismiss: '.promo-close' }))
+      const cfg = loadSiteConfig(dir, 'kimi')
+      expect(cfg.dismiss).toBe('.promo-close')
+      expect(cfg.input).toBe(WEB_SITES.find((s) => s.id === 'kimi')!.input)
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }

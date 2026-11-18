@@ -8,9 +8,13 @@ import { agentPrompt, flattenConversation, latestUserText, parseEmulatedToolCall
 import { BrowserMissingError, type ProfilePool } from './browser'
 import { isSiteDefaultModel, pickModelOption, webDefaultModel, webModelInfo } from './model'
 import { htmlToMarkdown, REPLY_SNAPSHOT_SOURCE } from './reply-markdown'
-import { loadSiteConfig, type WebSiteConfig } from './sites'
+import { GENERIC_DISMISS, loadSiteConfig, type WebSiteConfig } from './sites'
 
 const REPLY_TIMEOUT_MS = 240_000
+/** How long the user has to solve a human check in the window that opens for it. */
+const HUMAN_CHECK_TIMEOUT_MS = 180_000
+/** After a human check, requests keep using a visible window for this long so a repeat check can be solved in place. */
+const HEADED_AFTER_CHECK_MS = 10 * 60_000
 const STABLE_MS = 2_000
 /** Some sites ignore clicks on the model picker until the page has finished starting up. */
 const MODEL_MENU_ATTEMPTS = 6
@@ -65,6 +69,8 @@ export class WebChatProvider implements Provider {
   readonly name: string
   readonly description: string
   private connecting = false
+  /** Until this time, browsers open visibly because the site recently asked for a human check. */
+  private headedUntil = 0
   private readonly sessions = new Map<string, WebSession>()
   /** Saved chats whose site conversation has its own URL. Outlives the tab, not the app. */
   private readonly threads = new Map<string, WebThread>()
@@ -106,7 +112,7 @@ export class WebChatProvider implements Provider {
   }
 
   private headless(): boolean {
-    return !this.ctx.settings().showBrowser
+    return !this.ctx.settings().showBrowser && Date.now() >= this.headedUntil
   }
 
   private channel(): string | undefined {
@@ -173,6 +179,7 @@ export class WebChatProvider implements Provider {
       // Cloudflare interstitial often has no matching iframe yet, only this title.
       if (/just a moment/i.test(title)) return 'captcha'
       if (site.captcha && (await page.locator(site.captcha).count().catch(() => 0))) return 'captcha'
+      await this.dismissPopups(page, site)
       // Prefer the prompt box: guest UIs often still show a Log in banner.
       if ((await page.locator(site.input).count().catch(() => 0)) > 0) return 'ready'
       const loggedOut = site.loginRequired && (await page.locator(site.loggedOutSelector).count().catch(() => 0)) > 0
@@ -182,6 +189,63 @@ export class WebChatProvider implements Provider {
     // Still stuck on the challenge title after the timeout → treat as captcha, not a missing selector.
     if (/just a moment/i.test(await page.title().catch(() => ''))) return 'captcha'
     return 'unknown'
+  }
+
+  private dismissSelector(site: WebSiteConfig): string {
+    return [site.dismiss, GENERIC_DISMISS].filter(Boolean).join(', ')
+  }
+
+  private async showsHumanCheck(page: Page, site: WebSiteConfig): Promise<boolean> {
+    if (/just a moment/i.test(await page.title().catch(() => ''))) return true
+    return !!site.captcha && (await page.locator(site.captcha).count().catch(() => 0)) > 0
+  }
+
+  /** Clicks a visible popup's close / accept control, or presses Escape when the click does not land. */
+  private async dismissPopups(page: Page, site: WebSiteConfig): Promise<void> {
+    const popup = page.locator(this.dismissSelector(site)).first()
+    if (!(await popup.isVisible().catch(() => false))) return
+    // A human-check dialog may match a generic close button; closing it would hide the check, not pass it.
+    if (await this.showsHumanCheck(page, site)) return
+    await popup.click({ timeout: 2_000 }).catch(() => page.keyboard.press('Escape').catch(() => undefined))
+  }
+
+  /** Lets Playwright clear a popup that appears in front of the prompt box, send button or model menu before each action. */
+  private async installPopupHandlers(page: Page, site: WebSiteConfig): Promise<void> {
+    await page
+      .addLocatorHandler(page.locator(this.dismissSelector(site)).first(), () => this.dismissPopups(page, site), { noWaitAfter: true })
+      .catch(() => undefined)
+  }
+
+  /**
+   * Shows the page in a visible window and waits for the user to pass the site's human check.
+   * A headless tab cannot be shown, so its open tabs are closed and `url` is reopened in a visible window of the same profile.
+   * Returns the page to continue on and its state after the check.
+   */
+  private async solveHumanCheck(page: Page, site: WebSiteConfig, url: string, opts: ChatOptions, push: (d: Delta) => void): Promise<{ page: Page; state: 'ready' | 'logged_out' }> {
+    const wasHeadless = this.headless()
+    this.headedUntil = Date.now() + HEADED_AFTER_CHECK_MS
+    if (wasHeadless) {
+      await page.close().catch(() => undefined)
+      await this.closeTabs()
+      const context = await this.pool.context(this.siteId, { headless: false, channel: this.channel() })
+      page = await context.newPage()
+      await this.installPopupHandlers(page, site)
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => undefined)
+    } else {
+      await page.bringToFront().catch(() => undefined)
+    }
+    push({ type: 'status', message: `${site.name} is asking for a human check. Solve it in the browser window that just opened.` })
+    const deadline = Date.now() + HUMAN_CHECK_TIMEOUT_MS
+    while (Date.now() < deadline) {
+      if (opts.signal?.aborted) throw new ProviderError(this.id, 'aborted', 'Cancelled')
+      if (page.isClosed()) throw new ProviderError(this.id, 'captcha', `The ${site.name} window was closed before the human check was solved.`)
+      const state = await this.waitForState(page, site, 2_000)
+      if (state === 'ready' || state === 'logged_out') {
+        push({ type: 'status', message: `Human check passed on ${site.name}.` })
+        return { page, state }
+      }
+    }
+    throw new ProviderError(this.id, 'captcha', `${site.name} still shows a human check after ${HUMAN_CHECK_TIMEOUT_MS / 60_000} minutes. Solve it in the window, or click Connect in Customize → Providers.`)
   }
 
   async *chat(messages: ChatMessage[], opts: ChatOptions): AsyncIterable<Delta> {
@@ -423,6 +487,11 @@ export class WebChatProvider implements Provider {
   private async dropAllSessions(): Promise<void> {
     // Signing in or out can change the account, so saved site conversations may no longer be reachable.
     this.threads.clear()
+    await this.closeTabs()
+  }
+
+  /** Closes every open session tab but keeps the saved conversations, so they reopen on the next request. */
+  private async closeTabs(): Promise<void> {
     await Promise.all([...this.sessions.keys()].map((id) => this.dropSession(id)))
   }
 
@@ -439,11 +508,13 @@ export class WebChatProvider implements Provider {
   private async openChat(site: WebSiteConfig, opts: ChatOptions, push: (d: Delta) => void, resumeUrl?: string): Promise<Page> {
     push({ type: 'status', message: `Opening ${site.name}…` })
     const context = await this.pool.context(this.siteId, { headless: this.headless(), channel: this.channel() })
-    const page = await context.newPage()
+    let page = await context.newPage()
     try {
-      await page.goto(resumeUrl ?? site.newChatUrl, { waitUntil: 'domcontentloaded', timeout: 45_000 })
-      const state = await this.waitForState(page, site, 25_000)
-      if (state === 'captcha') throw new ProviderError(this.id, 'captcha', `${site.name} is asking for a human check. Open Customize → Providers and click Connect to solve it.`)
+      await this.installPopupHandlers(page, site)
+      const url = resumeUrl ?? site.newChatUrl
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45_000 })
+      let state = await this.waitForState(page, site, 25_000)
+      if (state === 'captcha') ({ page, state } = await this.solveHumanCheck(page, site, url, opts, push))
       if (state === 'logged_out') {
         this.ctx.saveConfig({ loggedIn: false, checkedAt: Date.now() })
         throw new ProviderError(this.id, 'not_logged_in', `Not signed in to ${site.name}. Click Connect in Customize → Providers.`)
@@ -471,7 +542,7 @@ export class WebChatProvider implements Provider {
     let emitted = ''
     let lastChange = Date.now()
     let lastText = ''
-    const started = Date.now()
+    let started = Date.now()
     while (true) {
       if (opts.signal?.aborted) throw new ProviderError(this.id, 'aborted', 'Cancelled')
       if (Date.now() - started > REPLY_TIMEOUT_MS) {
@@ -495,7 +566,16 @@ export class WebChatProvider implements Provider {
       const generating = site.generating ? (await page.locator(site.generating).count().catch(() => 0)) > 0 : false
       if (current && !generating && Date.now() - lastChange > STABLE_MS) break
       if (site.captcha && (await page.locator(site.captcha).count().catch(() => 0))) {
-        throw new ProviderError(this.id, 'captcha', `${site.name} asked for a human check mid-reply.`)
+        if (this.headless()) {
+          // The reply lives in this headless tab, which cannot be shown. Open the next request visibly so the check can be solved there.
+          this.headedUntil = Date.now() + HEADED_AFTER_CHECK_MS
+          throw new ProviderError(this.id, 'captcha', `${site.name} asked for a human check mid-reply. Send again: a browser window will open so you can solve it.`)
+        }
+        await this.solveHumanCheck(page, site, page.url(), opts, push)
+        // Time spent on the check does not count against the reply timeout.
+        started = lastChange = Date.now()
+        push({ type: 'status', message: `Waiting for ${site.name} to reply…` })
+        continue
       }
       await sleep(350)
     }

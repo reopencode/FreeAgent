@@ -21,7 +21,7 @@ interface Defaults {
 
 const WEB_FIELDS: ProviderSetupInfo['fields'] = [
   { key: 'model', label: 'Model name', placeholder: "Picked in the site's model menu before each chat, e.g. Argon, Pro, Expert. Empty keeps the site's current model." },
-  { key: 'browserChannel', label: 'Browser channel', placeholder: 'chromium (default), chrome or msedge' },
+  { key: 'browserChannel', label: 'Browser channel', placeholder: 'chromium (default), chrome or msedge. Installed Chrome gets far fewer human checks.' },
   { key: 'dailyLimit', label: 'Daily request limit', placeholder: '100', type: 'number' }
 ]
 
