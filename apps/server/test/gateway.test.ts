@@ -25,6 +25,14 @@ describe('Anthropic gateway translation', () => {
     expect(res.content).toEqual([{ type: 'tool_use', id: 'c1', name: 'Bash', input: { command: 'pwd' } }])
   })
 
+  it('keeps a base64 image block', () => {
+    const { messages } = fromAnthropic({
+      messages: [{ role: 'user', content: [{ type: 'text', text: 'see' }, { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'aGVsbG8=' } }] }]
+    })
+    expect(messages[0]).toMatchObject({ role: 'user', content: 'see' })
+    expect(messages[0].attachments?.[0]).toMatchObject({ kind: 'image', mime: 'image/png', dataBase64: 'aGVsbG8=' })
+  })
+
   it('maps Claude model names onto auto targets', () => {
     const known = (t: string): boolean => t === 'openrouter'
     expect(targetForModel('claude-3-5-haiku-latest', known)).toBe('auto-fast')
@@ -49,6 +57,22 @@ describe('OpenAI gateway translation', () => {
     expect(messages[1].toolCalls?.[0]).toEqual({ id: 'c1', name: 'f', arguments: '{}' })
     expect(messages[2]).toMatchObject({ role: 'tool', toolCallId: 'c1', content: 'done' })
     expect(tools?.[0].name).toBe('f')
+  })
+
+  it('keeps image bytes instead of dropping them', () => {
+    const { messages } = fromOpenAI({
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'look' },
+            { type: 'image_url', image_url: { url: 'data:image/png;base64,aGVsbG8=' } }
+          ]
+        }
+      ]
+    })
+    expect(messages[0].content).toBe('look')
+    expect(messages[0].attachments?.[0]).toMatchObject({ kind: 'image', mime: 'image/png', dataBase64: 'aGVsbG8=' })
   })
 
   it('builds a completion with tool calls', () => {

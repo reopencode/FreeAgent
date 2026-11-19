@@ -20,6 +20,10 @@ export interface RouteRequest {
   exclude?: string[]
   /** Identifies one agent run so providers can keep a conversation open across steps. */
   sessionId?: string
+  /** The conversation includes an image. Website and app providers are skipped; vision-tagged ones are preferred. */
+  images?: boolean
+  /** The conversation includes audio. Auto tries Gemini only. Other targets must be an API provider. */
+  audio?: boolean
 }
 
 export interface ParsedTarget {
@@ -98,7 +102,7 @@ export class Router {
     if (typeof configured === 'string' && configured.trim()) return configured.trim()
     if (tag && p.kind === 'api') {
       const models = await p.models().catch(() => [])
-      const match = models.find((m) => m.tags.includes(tag))
+      const match = models.find((m) => m.tags.includes(tag) && (tag === 'media' || !m.tags.includes('media')))
       if (match) return match.id
     }
     return p.defaultModel()
@@ -112,6 +116,9 @@ export class Router {
     if (parsed.providerId) {
       const p = this.registry.get(parsed.providerId)
       if (!p) throw new NoProviderError(`Unknown provider "${parsed.providerId}"`)
+      if ((req.images || req.audio) && (p.kind !== 'api' || p.id === 'mock')) {
+        throw new NoProviderError(`${p.name} cannot take ${req.audio ? 'audio' : 'images'}. Pick an API provider.`)
+      }
       out.push({ provider: p, model: await this.pickModel(p, undefined, parsed.model) })
       exclude.add(p.id)
       const fallback = this.store.getSettings().fallbackOnExplicit && p.kind !== 'app'
@@ -127,8 +134,11 @@ export class Router {
     const anyReal = ready.some((p) => p.id !== 'mock')
     for (const p of ready) {
       if ((anyReal && p.id === 'mock') || this.coolingDown(p.id)) continue
+      if ((req.images || req.audio) && (p.kind !== 'api' || p.id === 'mock')) continue
+      if (req.audio && !parsed.providerId && p.id !== 'gemini-api') continue
       let score = this.registry.priority(p.id)
       if (parsed.tag && p.tags.includes(parsed.tag)) score -= 15
+      if (req.images && p.tags.includes('vision')) score -= 20
       if (needTools && !p.supportsTools) score += 25
       if (this.overLimit(p.id)) score += 10_000
       scored.push({ p, score })
@@ -160,6 +170,8 @@ export class Router {
     const list = await this.candidates(req)
     if (!list.length) {
       const skipped = this.skipped()
+      if (req.audio) throw new NoProviderError('No ready provider accepts audio. Add a Gemini API key, or pick an API provider that accepts it.')
+      if (req.images) throw new NoProviderError('No ready provider accepts images. Website and app providers cannot take them.')
       throw new NoProviderError(
         skipped.length
           ? `Every ready provider is cooling down after errors. Try again shortly. ${skipped.join(' · ')}`
@@ -187,7 +199,7 @@ export class Router {
             usage = { inputTokens: d.inputTokens ?? usage.inputTokens, outputTokens: d.outputTokens ?? usage.outputTokens }
             continue
           }
-          if (d.type === 'text' || d.type === 'tool_call') produced = true
+          if (d.type === 'text' || d.type === 'tool_call' || d.type === 'media') produced = true
           yield d
         }
         this.store.recordUsage(provider.id, { ok: true, ...usage })

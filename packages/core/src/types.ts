@@ -7,6 +7,15 @@ export interface ToolCall {
   arguments: string
 }
 
+/** Image or audio bytes handed to an API provider. `url` is a remote image that was not downloaded. */
+export interface ChatAttachment {
+  kind: 'image' | 'audio' | 'file'
+  name: string
+  mime: string
+  dataBase64?: string
+  url?: string
+}
+
 export interface ChatMessage {
   role: Role
   content: string
@@ -14,6 +23,7 @@ export interface ChatMessage {
   toolCallId?: string
   /** Tool name for `tool` messages. */
   name?: string
+  attachments?: ChatAttachment[]
 }
 
 export interface JsonSchema {
@@ -32,6 +42,7 @@ export interface ToolSpec {
 export type Delta =
   /** `replace` swaps the whole reply so far for `text` (used when a rewritten reply is not an extension of the old one). */
   | { type: 'text'; text: string; replace?: boolean }
+  | { type: 'media'; mime: string; name?: string; base64: string }
   | { type: 'tool_call'; call: ToolCall }
   | { type: 'status'; message: string }
   | { type: 'usage'; inputTokens?: number; outputTokens?: number }
@@ -50,7 +61,7 @@ export interface ChatOptions {
 
 export type ProviderKind = 'api' | 'web' | 'app'
 
-export type CapabilityTag = 'code' | 'long-context' | 'vision' | 'fast' | 'reasoning' | 'general'
+export type CapabilityTag = 'code' | 'long-context' | 'vision' | 'fast' | 'reasoning' | 'general' | 'media'
 
 export interface ModelInfo {
   id: string

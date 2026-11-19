@@ -1,6 +1,8 @@
 import { useSyncExternalStore } from 'react'
 import type { AgentEvent, ChatMode, CouncilAnswer, RouteAttempt, ToolStep } from '@core/api-types'
-import { api, streamMessage } from './api'
+import { toast } from 'sonner'
+import type { DraftAttachment } from '@/components/chat/draft'
+import { api, streamEdit, streamMessage, streamRegenerate, type ChatStreamBody } from './api'
 import { keys, queryClient } from './queries'
 
 export interface LiveReply {
@@ -20,6 +22,8 @@ export interface LiveReply {
   approvals: Record<string, string>
   error?: string
   startedAt: number
+  drafts?: DraftAttachment[]
+  media: { mime: string; name?: string; base64: string }[]
 }
 
 const live = new Map<string, LiveReply>()
@@ -50,10 +54,12 @@ function apply(r: LiveReply, ev: AgentEvent): LiveReply {
       const last = attempts[attempts.length - 1]
       if (last) attempts[attempts.length - 1] = { ...last, error: ev.error }
       // Nothing was shown from the failed provider, so its partial text (if any) is dropped.
-      return { ...r, attempts, content: r.steps.length ? r.content : '', stepBase: r.steps.length ? r.stepBase : 0, status: `Switching from ${ev.providerId}…` }
+      return { ...r, attempts, content: r.steps.length ? r.content : '', media: r.steps.length ? r.media : [], stepBase: r.steps.length ? r.stepBase : 0, status: `Switching from ${ev.providerId}…` }
     }
     case 'text':
       return { ...r, content: ev.replace ? r.content.slice(0, r.stepBase ?? 0) + ev.text : r.content + ev.text, status: undefined }
+    case 'media':
+      return { ...r, media: [...r.media, { mime: ev.mime, name: ev.name, base64: ev.base64 }] }
     case 'status':
       return { ...r, status: ev.message }
     case 'step_start': {
@@ -100,18 +106,44 @@ async function finish(chatId: string): Promise<void> {
   emit()
 }
 
-export function startReply(chatId: string, body: { content: string; mode: ChatMode; target: string }): void {
+function begin(chatId: string, userText: string, drafts: DraftAttachment[] | undefined, run: (onEvent: (ev: AgentEvent) => void, signal: AbortSignal) => Promise<void>): void {
   if (controllers.has(chatId)) return
   const controller = new AbortController()
   controllers.set(chatId, controller)
-  live.set(chatId, { chatId, userText: body.content, content: '', attempts: [], steps: [], council: [], approvals: {}, startedAt: Date.now() })
+  live.set(chatId, { chatId, userText, drafts, content: '', attempts: [], steps: [], council: [], approvals: {}, media: [], startedAt: Date.now() })
   emit()
-  streamMessage(chatId, body, (ev) => update(chatId, (r) => apply(r, ev)), controller.signal)
+  let unseenError: string | undefined
+  run(
+    (ev) => {
+      if (ev.type === 'error') unseenError = ev.message
+      if (ev.type === 'done' && ev.message) unseenError = undefined
+      update(chatId, (r) => apply(r, ev))
+    },
+    controller.signal
+  )
     .catch((err: unknown) => {
       if (controller.signal.aborted) return
-      update(chatId, (r) => ({ ...r, error: err instanceof Error ? err.message : String(err) }))
+      unseenError = err instanceof Error ? err.message : String(err)
+      update(chatId, (r) => ({ ...r, error: unseenError }))
     })
-    .finally(() => void finish(chatId))
+    .finally(() => {
+      if (unseenError) toast.error(unseenError)
+      void finish(chatId)
+    })
+}
+
+export function startReply(chatId: string, body: ChatStreamBody & { mode: ChatMode; target: string; drafts?: DraftAttachment[] }): void {
+  const { drafts, ...wire } = body
+  begin(chatId, body.content ?? '', drafts, (onEvent, signal) => streamMessage(chatId, wire, onEvent, signal))
+}
+
+export function startEdit(chatId: string, body: ChatStreamBody & { messageId: string; mode: ChatMode; target: string; drafts?: DraftAttachment[] }): void {
+  const { drafts, ...wire } = body
+  begin(chatId, body.content ?? '', drafts, (onEvent, signal) => streamEdit(chatId, wire, onEvent, signal))
+}
+
+export function startRegenerate(chatId: string, body: { mode: ChatMode; target: string }): void {
+  begin(chatId, '', undefined, (onEvent, signal) => streamRegenerate(chatId, body, onEvent, signal))
 }
 
 /** Asks the server to stop so it can still save the partial reply; drops the stream if it does not end soon. */

@@ -4,6 +4,7 @@ import { dirname } from 'node:path'
 import type {
   AgentEvent,
   AppSettings,
+  Attachment,
   Automation,
   AutomationRun,
   Chat,
@@ -113,7 +114,8 @@ const MIGRATIONS: string[] = [
     env TEXT,
     enabled INTEGER NOT NULL DEFAULT 1
   );
-  `
+  `,
+  `ALTER TABLE messages ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]';`
 ]
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -247,8 +249,9 @@ export class Store {
       params.push(opts.projectId)
     }
     if (opts.query) {
-      where.push('title LIKE ?')
-      params.push(`%${opts.query}%`)
+      const like = `%${opts.query.replace(/[\\%_]/g, (ch) => `\\${ch}`)}%`
+      where.push(`(title LIKE ? ESCAPE '\\' OR id IN (SELECT chat_id FROM messages WHERE content LIKE ? ESCAPE '\\'))`)
+      params.push(like, like)
     }
     const sql = `SELECT * FROM chats ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY updated_at DESC LIMIT ?`
     return this.all(sql, ...params, opts.limit ?? 100).map(toChat)
@@ -307,6 +310,23 @@ export class Store {
     return this.all('SELECT * FROM messages WHERE chat_id = ? ORDER BY created_at, rowid', chatId).map(toMessage)
   }
 
+  /** Deletes this message and every later message in the chat. Returns the rows that were removed. */
+  deleteFrom(chatId: string, messageId: string): StoredMessage[] {
+    const messages = this.listMessages(chatId)
+    const idx = messages.findIndex((m) => m.id === messageId)
+    if (idx < 0) return []
+    const removed = messages.slice(idx)
+    const anchor = removed[0]
+    this.run(
+      'DELETE FROM messages WHERE chat_id = ? AND (created_at > ? OR (created_at = ? AND rowid >= (SELECT rowid FROM messages WHERE id = ?)))',
+      chatId,
+      anchor.createdAt,
+      anchor.createdAt,
+      anchor.id
+    )
+    return removed
+  }
+
   addMessage(input: Omit<StoredMessage, 'id' | 'createdAt' | 'meta' | 'toolCalls' | 'toolCallId'> & Partial<StoredMessage>): StoredMessage {
     const m: StoredMessage = {
       id: id('msg_'),
@@ -315,17 +335,19 @@ export class Store {
       content: input.content,
       toolCalls: input.toolCalls ?? null,
       toolCallId: input.toolCallId ?? null,
+      attachments: input.attachments ?? [],
       meta: input.meta ?? {},
       createdAt: now()
     }
     this.run(
-      'INSERT INTO messages (id, chat_id, role, content, tool_calls, tool_call_id, meta, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO messages (id, chat_id, role, content, tool_calls, tool_call_id, attachments, meta, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
       m.id,
       m.chatId,
       m.role,
       m.content,
       m.toolCalls ? JSON.stringify(m.toolCalls) : null,
       m.toolCallId,
+      JSON.stringify(m.attachments ?? []),
       JSON.stringify(m.meta),
       m.createdAt
     )
@@ -599,6 +621,7 @@ function toMessage(r: Row): StoredMessage {
     content: String(r.content),
     toolCalls: safeJson(r.tool_calls as string | null, null),
     toolCallId: (r.tool_call_id as string | null) ?? null,
+    attachments: safeJson<Attachment[]>(r.attachments as string | null, []),
     meta: safeJson(r.meta as string, {}),
     createdAt: Number(r.created_at)
   }

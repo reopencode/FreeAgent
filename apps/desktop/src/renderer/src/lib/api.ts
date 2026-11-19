@@ -47,15 +47,18 @@ export const api = {
   del: <T>(path: string) => request<T>('DELETE', path)
 }
 
-/** Sends a chat message and calls `onEvent` for each server-sent event until the reply is done. */
-export async function streamMessage(
-  chatId: string,
-  body: { content: string; mode?: ChatMode; target?: string },
-  onEvent: (ev: AgentEvent) => void,
-  signal?: AbortSignal
-): Promise<void> {
+export interface ChatStreamBody {
+  content?: string
+  mode?: ChatMode
+  target?: string
+  messageId?: string
+  attachments?: { name: string; mime: string; dataBase64: string }[]
+}
+
+/** POSTs JSON and calls `onEvent` for each server-sent event until the reply is done. */
+export async function streamSse(path: string, body: unknown, onEvent: (ev: AgentEvent) => void, signal?: AbortSignal): Promise<void> {
   const c = connection()
-  const res = await fetch(`${c.baseUrl}/api/chats/${chatId}/messages`, {
+  const res = await fetch(`${c.baseUrl}${path}`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${c.token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -84,4 +87,17 @@ export async function streamMessage(
       if (data) onEvent(JSON.parse(data) as AgentEvent)
     }
   }
+}
+
+/** Sends a chat message and calls `onEvent` for each server-sent event until the reply is done. */
+export function streamMessage(chatId: string, body: ChatStreamBody, onEvent: (ev: AgentEvent) => void, signal?: AbortSignal): Promise<void> {
+  return streamSse(`/api/chats/${chatId}/messages`, body, onEvent, signal)
+}
+
+export function streamEdit(chatId: string, body: ChatStreamBody, onEvent: (ev: AgentEvent) => void, signal?: AbortSignal): Promise<void> {
+  return streamSse(`/api/chats/${chatId}/edit`, body, onEvent, signal)
+}
+
+export function streamRegenerate(chatId: string, body: ChatStreamBody, onEvent: (ev: AgentEvent) => void, signal?: AbortSignal): Promise<void> {
+  return streamSse(`/api/chats/${chatId}/regenerate`, body, onEvent, signal)
 }

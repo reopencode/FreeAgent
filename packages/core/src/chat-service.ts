@@ -1,13 +1,26 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
-import type { AgentEvent, ChatMode, StoredMessage } from './api-types'
+import type { AgentEvent, Attachment, ChatMode, IncomingAttachment, StoredMessage } from './api-types'
 import type { AgentRunner, RunResult } from './agent/runner'
+import { attachmentKind, isTextAttachment, parseIncomingAttachments, readChatMedia, removeChatFile, saveChatMedia, TEXT_INLINE_LIMIT } from './media'
 import type { Store } from './store'
-import type { ChatMessage } from './types'
+import type { ChatAttachment, ChatMessage } from './types'
 import { applyTextDelta, truncate } from './util'
 
 const PROJECT_FILES_BUDGET = 40_000
 const HISTORY_LIMIT = 40
+
+function mediaFlags(messages: ChatMessage[]): { images: boolean; audio: boolean } {
+  let images = false
+  let audio = false
+  for (const m of messages) {
+    for (const a of m.attachments ?? []) {
+      if (a.kind === 'image') images = true
+      if (a.kind === 'audio') audio = true
+    }
+  }
+  return { images, audio }
+}
 
 export class ChatService {
   constructor(
@@ -51,34 +64,68 @@ export class ChatService {
     return parts.join('\n\n')
   }
 
-  history(chatId: string): ChatMessage[] {
+  /** User and assistant turns, with image and audio bytes loaded and text files inlined. */
+  providerHistory(chatId: string): ChatMessage[] {
     return this.store
       .listMessages(chatId)
-      .filter((m) => (m.role === 'user' || m.role === 'assistant') && m.content.trim())
+      .filter((m) => (m.role === 'user' || m.role === 'assistant') && (m.content.trim() || (m.attachments?.length ?? 0) > 0))
       .slice(-HISTORY_LIMIT)
-      .map((m) => ({ role: m.role, content: m.content }))
+      .map((m) => this.toProviderMessage(chatId, m))
   }
 
-  /** Sends a user message in a saved chat, streams events, and stores the reply. */
-  async send(
-    chatId: string,
-    content: string,
-    opts: { mode?: ChatMode; target?: string; signal?: AbortSignal; emit: (ev: AgentEvent) => void }
-  ): Promise<StoredMessage | null> {
-    let chat = this.store.getChat(chatId)
+  private toProviderMessage(chatId: string, m: StoredMessage): ChatMessage {
+    const notes: string[] = []
+    const attachments: ChatAttachment[] = []
+    for (const a of m.attachments ?? []) {
+      const data = readChatMedia(this.dataDir, chatId, a.id)
+      if (!data) continue
+      if (a.kind === 'file') {
+        if (isTextAttachment(a.mime, a.name) && !data.includes(0)) {
+          notes.push(`<file name="${a.name.replace(/"/g, '')}">\n${data.toString('utf8').slice(0, TEXT_INLINE_LIMIT)}\n</file>`)
+        } else notes.push(`Attached: ${a.name}`)
+        continue
+      }
+      attachments.push({ kind: a.kind, name: a.name, mime: a.mime, dataBase64: data.toString('base64') })
+    }
+    const content = [m.content.trim(), ...notes].filter(Boolean).join('\n\n')
+    return { role: m.role === 'assistant' ? 'assistant' : 'user', content, ...(attachments.length ? { attachments } : {}) }
+  }
+
+  private touch(chatId: string, opts: { mode?: ChatMode; target?: string }, titleSource?: string): void {
+    const chat = this.store.getChat(chatId)
     if (!chat) throw new Error('Chat not found')
     const patch: Parameters<Store['updateChat']>[1] = {}
     if (opts.mode && opts.mode !== chat.mode) patch.mode = opts.mode
     if (opts.target && opts.target !== chat.target) patch.target = opts.target
-    if (chat.title === 'New chat') patch.title = titleFrom(content)
-    if (Object.keys(patch).length) chat = this.store.updateChat(chatId, patch)!
+    if (titleSource && chat.title === 'New chat') patch.title = titleFrom(titleSource)
+    if (Object.keys(patch).length) this.store.updateChat(chatId, patch)
+  }
 
-    const userMsg = this.store.addMessage({ chatId, role: 'user', content })
-    opts.emit({ type: 'user_message', message: userMsg })
+  private forgetMedia(chatId: string, messages: StoredMessage[]): void {
+    for (const m of messages) for (const a of m.attachments ?? []) removeChatFile(this.dataDir, chatId, a.id)
+  }
+
+  private persistMedia(chatId: string, media: RunResult['media']): Attachment[] {
+    const saved: Attachment[] = []
+    for (const part of media ?? []) {
+      const data = Buffer.from(part.base64, 'base64')
+      if (!data.length) continue
+      const mime = part.mime || 'application/octet-stream'
+      const kind = attachmentKind(mime)
+      saved.push(saveChatMedia(this.dataDir, chatId, { name: part.name || (kind === 'audio' ? 'audio' : 'image'), mime, kind, data }))
+    }
+    return saved
+  }
+
+  /** Runs the current history and stores the assistant reply. */
+  private async complete(chatId: string, opts: { signal?: AbortSignal; emit: (ev: AgentEvent) => void }): Promise<StoredMessage | null> {
+    const chat = this.store.getChat(chatId)
+    if (!chat) throw new Error('Chat not found')
     const cwd = this.workspaceFor(chat.projectId)
     const settings = this.store.getSettings()
-    const messages: ChatMessage[] = [{ role: 'system', content: this.systemPrompt(chat.projectId, chat.mode, cwd) }, ...this.history(chatId)]
-
+    const history = this.providerHistory(chatId)
+    const flags = mediaFlags(history)
+    const messages: ChatMessage[] = [{ role: 'system', content: this.systemPrompt(chat.projectId, chat.mode, cwd) }, ...history]
     let result: RunResult | undefined
     let partial = ''
     try {
@@ -92,6 +139,8 @@ export class ChatService {
         autoApprove: settings.autoApprove,
         maxSteps: settings.maxAgentSteps,
         councilSize: settings.councilSize,
+        images: flags.images,
+        audio: flags.audio,
         emit: (ev) => {
           if (ev.type === 'text') partial = applyTextDelta(partial, ev)
           if (ev.type === 'route') partial = ''
@@ -105,9 +154,96 @@ export class ChatService {
       opts.emit({ type: 'done', message: saved })
       return saved
     }
-    const saved = this.store.addMessage({ chatId, role: 'assistant', content: result.text, meta: result.meta })
+    const saved = this.store.addMessage({ chatId, role: 'assistant', content: result.text, meta: result.meta, attachments: this.persistMedia(chatId, result.media) })
     opts.emit({ type: 'done', message: saved })
     return saved
+  }
+
+  /**
+   * Checks the new turn against the provider before anything is deleted or stored.
+   * `ignoreFrom` drops that message and everything after it from the check, which is the range an edit will remove.
+   */
+  private async prepareTurn(
+    chatId: string,
+    input: { content: string; attachments?: IncomingAttachment[]; mode?: ChatMode; target?: string },
+    ignoreFrom?: string
+  ): Promise<{ text: string; parsed: ReturnType<typeof parseIncomingAttachments> }> {
+    const parsed = parseIncomingAttachments(input.attachments)
+    const text = input.content.trim()
+    if (!text && !parsed.length) throw new Error('Message is empty')
+    const chat = this.store.getChat(chatId)
+    if (!chat) throw new Error('Chat not found')
+    const target = input.target || chat.target
+    const prior = this.store.listMessages(chatId)
+    const cut = ignoreFrom ? prior.findIndex((m) => m.id === ignoreFrom) : prior.length
+    const kept = (cut < 0 ? prior : prior.slice(0, cut))
+      .filter((m) => (m.role === 'user' || m.role === 'assistant') && (m.content.trim() || (m.attachments?.length ?? 0) > 0))
+      .slice(-HISTORY_LIMIT)
+      .map((m) => this.toProviderMessage(chatId, m))
+    const pending: ChatMessage = {
+      role: 'user',
+      content: text,
+      attachments: parsed.filter((a) => a.kind !== 'file').map((a) => ({ kind: a.kind, name: a.name, mime: a.mime, dataBase64: 'pending' }))
+    }
+    const flags = mediaFlags([...kept, pending])
+    if (flags.images || flags.audio) await this.runner.ensureMedia(target, flags)
+    this.touch(chatId, input, text || parsed.map((a) => a.name).join(', '))
+    return { text, parsed }
+  }
+
+  private storeUserTurn(chatId: string, text: string, parsed: ReturnType<typeof parseIncomingAttachments>, emit: (ev: AgentEvent) => void): void {
+    const attachments = parsed.map((a) => saveChatMedia(this.dataDir, chatId, a))
+    const userMsg = this.store.addMessage({ chatId, role: 'user', content: text, attachments })
+    emit({ type: 'user_message', message: userMsg })
+  }
+
+  /** Sends a user message in a saved chat, streams events, and stores the reply. */
+  async send(
+    chatId: string,
+    input: { content: string; attachments?: IncomingAttachment[]; mode?: ChatMode; target?: string; signal?: AbortSignal; emit: (ev: AgentEvent) => void }
+  ): Promise<StoredMessage | null> {
+    const { text, parsed } = await this.prepareTurn(chatId, input)
+    this.storeUserTurn(chatId, text, parsed, input.emit)
+    return this.complete(chatId, input)
+  }
+
+  /** Replaces the last user message (and everything after it) and sends the new one. */
+  async edit(
+    chatId: string,
+    messageId: string,
+    input: { content: string; attachments?: IncomingAttachment[]; mode?: ChatMode; target?: string; signal?: AbortSignal; emit: (ev: AgentEvent) => void }
+  ): Promise<StoredMessage | null> {
+    const lastUser = [...this.store.listMessages(chatId)].reverse().find((m) => m.role === 'user')
+    if (!lastUser || lastUser.id !== messageId) throw new Error('Only the last message you sent can be edited.')
+    const { text, parsed } = await this.prepareTurn(chatId, input, messageId)
+    this.forgetMedia(chatId, this.store.deleteFrom(chatId, messageId))
+    this.storeUserTurn(chatId, text, parsed, input.emit)
+    return this.complete(chatId, input)
+  }
+
+  /** Drops the last reply and runs the same history again. */
+  async regenerate(
+    chatId: string,
+    input: { mode?: ChatMode; target?: string; signal?: AbortSignal; emit: (ev: AgentEvent) => void }
+  ): Promise<StoredMessage | null> {
+    const messages = this.store.listMessages(chatId)
+    let lastUser = -1
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'user') {
+        lastUser = i
+        break
+      }
+    }
+    if (lastUser < 0) throw new Error('There is no message to regenerate.')
+    const rest = messages.slice(lastUser + 1)
+    if (!rest.length) throw new Error('There is no reply to regenerate.')
+    const chat = this.store.getChat(chatId)
+    if (!chat) throw new Error('Chat not found')
+    const flags = mediaFlags(this.providerHistory(chatId))
+    if (flags.images || flags.audio) await this.runner.ensureMedia(input.target || chat.target, flags)
+    this.touch(chatId, input)
+    this.forgetMedia(chatId, this.store.deleteFrom(chatId, rest[0].id))
+    return this.complete(chatId, input)
   }
 
   /** One-off run outside a saved chat, used by automations and the MCP server. */

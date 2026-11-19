@@ -1,6 +1,7 @@
 import {
   ProviderError,
   errorKindFromStatus,
+  type ChatAttachment,
   type ChatMessage,
   type ChatOptions,
   type Delta,
@@ -18,6 +19,7 @@ const FALLBACK_MODELS = ['gemini-2.5-flash', 'gemini-2.5-flash-lite', 'gemini-2.
 interface GeminiPart {
   text?: string
   thought?: boolean
+  inlineData?: { mimeType?: string; data?: string }
   functionCall?: { name: string; args?: Record<string, unknown>; id?: string }
   functionResponse?: { name: string; response: Record<string, unknown> }
 }
@@ -37,11 +39,18 @@ export function toGeminiRequest(messages: ChatMessage[]): { systemInstruction?: 
     if (last && last.role === role) last.parts.push(part)
     else contents.push({ role, parts: [part] })
   }
+  const pushAttachment = (role: GeminiContent['role'], a: ChatAttachment): void => {
+    if ((a.kind === 'image' || a.kind === 'audio') && a.dataBase64) push(role, { inlineData: { mimeType: a.mime, data: a.dataBase64 } })
+    else if (a.url) push(role, { text: a.url })
+  }
   for (const m of messages) {
     if (m.role === 'system') continue
-    if (m.role === 'user') push('user', { text: m.content })
-    else if (m.role === 'assistant') {
+    if (m.role === 'user') {
+      if (m.content) push('user', { text: m.content })
+      for (const a of m.attachments ?? []) pushAttachment('user', a)
+    } else if (m.role === 'assistant') {
       if (m.content) push('model', { text: m.content })
+      for (const a of m.attachments ?? []) pushAttachment('model', a)
       for (const c of m.toolCalls ?? []) {
         toolNames.set(c.id, c.name)
         let args: Record<string, unknown> = {}
@@ -100,10 +109,11 @@ export class GeminiProvider implements Provider {
       if (!res.ok) return fallback
       const body = (await res.json()) as { models?: { name: string; displayName?: string; inputTokenLimit?: number; supportedGenerationMethods?: string[] }[] }
       const models = (body.models ?? [])
-        .filter((m) => m.supportedGenerationMethods?.includes('generateContent') && /gemini/.test(m.name) && !/embedding|tts|image|live|audio/.test(m.name))
+        .filter((m) => m.supportedGenerationMethods?.includes('generateContent') && /gemini/.test(m.name) && !/embedding|live/.test(m.name))
         .map((m) => {
           const modelId = m.name.replace(/^models\//, '')
-          return { id: modelId, name: m.displayName ?? modelId, contextLength: m.inputTokenLimit, tags: inferTags(modelId, { contextLength: m.inputTokenLimit }) }
+          const media = /image|tts|lyria|music|audio/.test(modelId)
+          return { id: modelId, name: m.displayName ?? modelId, contextLength: m.inputTokenLimit, tags: inferTags(modelId, { contextLength: m.inputTokenLimit, media }) }
         })
       this.modelCache = { at: Date.now(), models: models.length ? models : fallback }
       return this.modelCache.models
@@ -175,6 +185,7 @@ export class GeminiProvider implements Provider {
       if (chunk.error) throw new ProviderError(this.id, errorKindFromStatus(chunk.error.code ?? 500), chunk.error.message ?? 'Gemini stream error')
       for (const part of chunk.candidates?.[0]?.content?.parts ?? []) {
         if (part.text && !part.thought) yield { type: 'text', text: part.text }
+        if (part.inlineData?.data) yield { type: 'media', mime: part.inlineData.mimeType || 'application/octet-stream', base64: part.inlineData.data }
         if (part.functionCall) {
           yield {
             type: 'tool_call',

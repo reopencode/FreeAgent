@@ -13,11 +13,17 @@ import {
   loadSiteConfig,
   siteOverridePath,
   validateSiteConfig,
+  chatToMarkdown,
+  markdownFilename,
+  readChatMedia,
+  removeChatMedia,
   type AgentEvent,
   type AppSettings,
+  type Attachment,
   type Automation,
   type ChatMode,
   type Core,
+  type IncomingAttachment,
   type ModelOption,
   type ServerInfo
 } from '@freeagent/core'
@@ -30,6 +36,14 @@ const MODES: ChatMode[] = ['chat', 'agent', 'council']
 
 function bad(c: Context, message: string, status = 400): Response {
   return c.json({ error: message }, status as 400)
+}
+
+function findAttachment(messages: { attachments?: Attachment[] }[], fileId: string): Attachment | undefined {
+  for (const m of messages) {
+    const hit = m.attachments?.find((a) => a.id === fileId)
+    if (hit) return hit
+  }
+  return undefined
 }
 
 async function body<T>(c: Context): Promise<T> {
@@ -119,16 +133,33 @@ export function createApp(core: Core, cfg: ServerConfig, scheduler: Scheduler): 
     running.get(chatId)?.abort()
     // Closes the website conversation the chat kept open, so a deleted chat leaves no tab behind.
     await core.registry.endSession(chatId)
+    removeChatMedia(core.dataDir, chatId)
     store.deleteChat(chatId)
     return c.json({ ok: true })
   })
 
-  app.post('/api/chats/:id/messages', async (c) => {
-    const chatId = c.req.param('id')
-    const b = await body<{ content?: string; mode?: ChatMode; target?: string }>(c)
+  app.get('/api/chats/:id/export', (c) => {
+    const chat = store.getChat(c.req.param('id'))
+    if (!chat) return bad(c, 'Chat not found', 404)
+    const filename = markdownFilename(chat.title)
+    return c.body(chatToMarkdown(chat, store.listMessages(chat.id)), 200, {
+      'Content-Type': 'text/markdown; charset=utf-8',
+      'Content-Disposition': `attachment; filename="${filename}"`
+    })
+  })
+
+  app.get('/api/media/:chatId/:fileId', (c) => {
+    const chatId = c.req.param('chatId')
+    const fileId = c.req.param('fileId')
     if (!store.getChat(chatId)) return bad(c, 'Chat not found', 404)
-    if (!b.content?.trim()) return bad(c, 'Message is empty')
-    if (b.mode && !MODES.includes(b.mode)) return bad(c, 'Invalid mode')
+    const attachment = findAttachment(store.listMessages(chatId), fileId)
+    const data = attachment && readChatMedia(core.dataDir, chatId, fileId)
+    if (!attachment || !data) return bad(c, 'File not found', 404)
+    return c.body(new Uint8Array(data), 200, { 'Content-Type': attachment.mime || 'application/octet-stream', 'Cache-Control': 'private, max-age=3600' })
+  })
+
+  const streamRun = (c: Context, chatId: string, run: (emit: (ev: AgentEvent) => void, signal: AbortSignal) => Promise<unknown>): Response | Promise<Response> => {
+    if (!store.getChat(chatId)) return bad(c, 'Chat not found', 404)
     if (running.has(chatId)) return bad(c, 'This chat is already answering. Stop it first.', 409)
     const controller = new AbortController()
     running.set(chatId, controller)
@@ -139,7 +170,7 @@ export function createApp(core: Core, cfg: ServerConfig, scheduler: Scheduler): 
         writes = writes.then(() => stream.writeSSE({ event: ev.type, data: JSON.stringify(ev) })).catch(() => undefined)
       }
       try {
-        await core.chats.send(chatId, b.content!.trim(), { mode: b.mode, target: b.target, signal: controller.signal, emit })
+        await run(emit, controller.signal)
       } catch (err) {
         emit({ type: 'error', message: err instanceof Error ? err.message : String(err) })
         emit({ type: 'done', message: null })
@@ -148,6 +179,32 @@ export function createApp(core: Core, cfg: ServerConfig, scheduler: Scheduler): 
         await writes
       }
     })
+  }
+
+  app.post('/api/chats/:id/messages', async (c) => {
+    const chatId = c.req.param('id')
+    const b = await body<{ content?: string; mode?: ChatMode; target?: string; attachments?: IncomingAttachment[] }>(c)
+    if (b.mode && !MODES.includes(b.mode)) return bad(c, 'Invalid mode')
+    const hasFiles = Array.isArray(b.attachments) && b.attachments.length > 0
+    if (!b.content?.trim() && !hasFiles) return bad(c, 'Message is empty')
+    return streamRun(c, chatId, (emit, signal) => core.chats.send(chatId, { content: b.content ?? '', attachments: b.attachments, mode: b.mode, target: b.target, signal, emit }))
+  })
+
+  app.post('/api/chats/:id/edit', async (c) => {
+    const chatId = c.req.param('id')
+    const b = await body<{ messageId?: string; content?: string; mode?: ChatMode; target?: string; attachments?: IncomingAttachment[] }>(c)
+    if (!b.messageId) return bad(c, 'messageId is required')
+    if (b.mode && !MODES.includes(b.mode)) return bad(c, 'Invalid mode')
+    const hasFiles = Array.isArray(b.attachments) && b.attachments.length > 0
+    if (!b.content?.trim() && !hasFiles) return bad(c, 'Message is empty')
+    return streamRun(c, chatId, (emit, signal) => core.chats.edit(chatId, b.messageId!, { content: b.content ?? '', attachments: b.attachments, mode: b.mode, target: b.target, signal, emit }))
+  })
+
+  app.post('/api/chats/:id/regenerate', async (c) => {
+    const chatId = c.req.param('id')
+    const b = await body<{ mode?: ChatMode; target?: string }>(c)
+    if (b.mode && !MODES.includes(b.mode)) return bad(c, 'Invalid mode')
+    return streamRun(c, chatId, (emit, signal) => core.chats.regenerate(chatId, { mode: b.mode, target: b.target, signal, emit }))
   })
 
   app.post('/api/chats/:id/abort', (c) => {

@@ -1,4 +1,22 @@
-import type { ChatMessage, ToolCall, ToolSpec } from '@freeagent/core'
+import type { ChatAttachment, ChatMessage, ToolCall, ToolSpec } from '@freeagent/core'
+
+function dataUrl(url: string): { mime: string; base64: string } | undefined {
+  const m = /^data:([^;,]+);base64,([A-Za-z0-9+/=\s]+)$/.exec(url.trim())
+  if (!m) return undefined
+  return { mime: m[1], base64: m[2].replace(/\s/g, '') }
+}
+
+function imageAttachment(source: unknown): ChatAttachment | undefined {
+  if (!source || typeof source !== 'object') return undefined
+  const s = source as { type?: string; media_type?: string; data?: string; url?: string }
+  if (s.type === 'base64' && s.data) return { kind: 'image', name: 'image', mime: s.media_type || 'image/png', dataBase64: s.data }
+  if (s.type === 'url' && s.url) {
+    const parsed = dataUrl(s.url)
+    if (parsed) return { kind: 'image', name: 'image', mime: parsed.mime, dataBase64: parsed.base64 }
+    return { kind: 'image', name: 'image', mime: 'image/*', url: s.url }
+  }
+  return undefined
+}
 
 type Block =
   | { type: 'text'; text: string }
@@ -48,14 +66,18 @@ export function fromAnthropic(req: AnthropicRequest): { messages: ChatMessage[];
       continue
     }
     const textParts: string[] = []
+    const attachments: ChatAttachment[] = []
     for (const b of m.content) {
       if (b.type === 'tool_result') {
         const content = blockText(b.content)
         messages.push({ role: 'tool', toolCallId: b.tool_use_id, name: names.get(b.tool_use_id), content: b.is_error ? `Error: ${content}` : content })
       } else if (b.type === 'text') textParts.push(b.text)
-      else if (b.type === 'image' || b.type === 'document') textParts.push(`[${b.type} omitted]`)
+      else if (b.type === 'image') {
+        const image = imageAttachment(b.source)
+        if (image) attachments.push(image)
+      } else if (b.type === 'document') textParts.push('[document omitted]')
     }
-    if (textParts.length) messages.push({ role: 'user', content: textParts.join('\n') })
+    if (textParts.length || attachments.length) messages.push({ role: 'user', content: textParts.join('\n'), ...(attachments.length ? { attachments } : {}) })
   }
 
   const tools = req.tools

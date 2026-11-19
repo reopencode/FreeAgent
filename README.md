@@ -209,6 +209,11 @@ Checked against the current app. Shipped behavior stays in the sections above.
 - [x] **Recent chats.** The sidebar groups them by day. A chat can be deleted. The title comes from the first message.
 - [x] **Offline demo.** Until a real provider is ready, the built-in demo answers so the window is usable.
 - [x] **One website thread per chat.** A saved chat keeps that site’s conversation open across turns, in Chat and Agent mode, so later turns type only the new message and later agent steps only the new tool results. A new site conversation gets a shortened prompt: up to 8K characters of project files, the last 10 earlier messages (2K characters each) and tool results cut to 6K characters.
+- [x] **Files and images in the composer.** Attach a file or image to a message. Text files are inlined into the prompt. Images go to API providers, including image parts that arrive through the OpenAI or Anthropic gateway.
+- [x] **Voice in the desktop chat.** Record or upload audio. Auto sends it to Gemini when that key is ready. An API provider picked by name receives it too.
+- [x] **Show generated media in the thread.** When a provider returns an image or audio clip, FreeAgent saves it and renders it under the reply.
+- [x] **Edit and regenerate.** Change the last user message, or ask for the reply again, without starting a new chat.
+- [x] **Search and export.** Find a chat from the sidebar by title or message text, and export one chat to a Markdown file.
 
 **Routing and limits**
 
@@ -249,14 +254,6 @@ Checked against the current app. Shipped behavior stays in the sections above.
 **Customize → General**
 
 - [x] **System prompt, theme and agent switches.** The system prompt is editable. Theme follows the OS, or stays light or dark. Also: auto-approve, fallback when a provider is picked by name, plain text to websites, council size and the agent step cap.
-
-### Chat
-
-- [ ] **Files and images in the composer.** Attach a file or image to a message. The composer is text only today. Image parts that arrive through the OpenAI or Anthropic gateway are dropped.
-- [ ] **Voice in the desktop chat.** Record or upload audio and send it to a provider that accepts it.
-- [ ] **Show generated media in the thread.** When a provider returns an image, audio clip or music file, save it and render it under the reply. Replies are markdown text today.
-- [ ] **Edit and regenerate.** Change the last user message, or ask the same provider again, without starting a new chat.
-- [ ] **Search and export.** Find a chat from the sidebar, and export one chat to a Markdown file.
 
 ### Agent
 

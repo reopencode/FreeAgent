@@ -7,7 +7,7 @@ import { parseClaudeStreamLine } from '../src/providers/apps/claude'
 import { cleanKiroLine } from '../src/providers/apps/kiro'
 import { flattenConversation, followUpPrompt, latestUserText, parseEmulatedToolCalls } from '../src/providers/emulated-tools'
 import { cleanSchema, toGeminiRequest } from '../src/providers/gemini'
-import { toOpenAIMessages } from '../src/providers/openai-compatible'
+import { mediaFromOpenAIDelta, toOpenAIMessages } from '../src/providers/openai-compatible'
 import { GENERIC_DISMISS, loadSiteConfig, siteOverridePath, validateSiteConfig, WEB_SITES } from '../src/providers/web/sites'
 import type { ToolSpec } from '../src/types'
 
@@ -167,6 +167,26 @@ describe('API provider message conversion', () => {
     expect(req.systemInstruction?.parts[0]).toEqual({ text: 'sys' })
     expect(req.contents.map((c) => c.role)).toEqual(['user', 'model', 'user'])
     expect(JSON.stringify(req.contents[2])).toContain('functionResponse')
+  })
+
+  it('sends image and audio parts to OpenAI and Gemini', () => {
+    const attachments = [
+      { kind: 'image' as const, name: 'a.png', mime: 'image/png', dataBase64: 'aaa' },
+      { kind: 'audio' as const, name: 'a.mp3', mime: 'audio/mpeg', dataBase64: 'bbb' }
+    ]
+    const open = toOpenAIMessages([{ role: 'user', content: 'look', attachments }]) as { content: { type: string; image_url?: { url: string }; input_audio?: { format: string } }[] }[]
+    expect(open[0].content.map((p) => p.type)).toEqual(['text', 'image_url', 'input_audio'])
+    expect(open[0].content[1].image_url?.url).toBe('data:image/png;base64,aaa')
+    expect(open[0].content[2].input_audio?.format).toBe('mp3')
+    const gemini = toGeminiRequest([{ role: 'user', content: '', attachments }])
+    expect(gemini.contents[0].parts).toEqual([
+      { inlineData: { mimeType: 'image/png', data: 'aaa' } },
+      { inlineData: { mimeType: 'audio/mpeg', data: 'bbb' } }
+    ])
+  })
+
+  it('reads an image out of an OpenAI stream delta', () => {
+    expect(mediaFromOpenAIDelta({ images: [{ image_url: { url: 'data:image/png;base64,aaa' } }] })).toEqual([{ mime: 'image/png', base64: 'aaa' }])
   })
 
   it('removes JSON schema keys Gemini rejects', () => {

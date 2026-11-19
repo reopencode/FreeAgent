@@ -1,7 +1,7 @@
 import { useState } from 'react'
-import type { CouncilAnswer, RouteAttempt, ToolStep } from '@core/api-types'
+import type { Attachment, CouncilAnswer, RouteAttempt, ToolStep } from '@core/api-types'
 import { useMutation } from '@tanstack/react-query'
-import { AlertCircle, Check, ChevronRight, CircleSlash, Copy, Loader2, ShieldQuestion, Users, Wrench, X } from 'lucide-react'
+import { AlertCircle, Check, ChevronRight, CircleSlash, Copy, Loader2, Pencil, RefreshCw, ShieldQuestion, Users, Wrench, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -11,10 +11,13 @@ import { api } from '@/lib/api'
 import { providerName } from '@/lib/format'
 import { useProviders } from '@/lib/queries'
 import { cn } from '@/lib/utils'
+import type { DraftAttachment } from './draft'
 import { Markdown } from './Markdown'
+import { DataMedia, FileChip, MediaFile } from './Media'
 
 export interface AssistantView {
   content: string
+  chatId?: string
   providerId?: string
   model?: string
   attempts?: RouteAttempt[]
@@ -25,12 +28,49 @@ export interface AssistantView {
   streaming?: boolean
   approvals?: Record<string, string>
   durationMs?: number
+  attachments?: Attachment[]
+  media?: { mime: string; name?: string; base64: string }[]
 }
 
-export function UserMessage({ text }: { text: string }): React.JSX.Element {
+export function UserMessage({
+  text,
+  chatId,
+  attachments,
+  drafts,
+  onEdit
+}: {
+  text: string
+  chatId?: string
+  attachments?: Attachment[]
+  drafts?: DraftAttachment[]
+  onEdit?: () => void
+}): React.JSX.Element {
   return (
-    <div className="flex justify-end">
-      <div className="max-w-[85%] rounded-2xl rounded-br-md bg-secondary px-4 py-2.5 text-[15px] leading-6 break-words whitespace-pre-wrap">{text}</div>
+    <div className="group flex justify-end">
+      <div className="flex max-w-[85%] flex-col items-end gap-1.5">
+        {(attachments?.length || drafts?.length) ? (
+          <div className="flex flex-wrap justify-end gap-2">
+            {attachments?.map((a) => (chatId ? <MediaFile key={a.id} chatId={chatId} attachment={a} /> : <FileChip key={a.id} name={a.name} />))}
+            {drafts?.map((a) =>
+              a.kind === 'image' && a.previewUrl ? (
+                <img key={a.localId} src={a.previewUrl} alt={a.name} className="max-h-64 rounded-lg" />
+              ) : a.kind === 'audio' && a.previewUrl ? (
+                <audio key={a.localId} controls src={a.previewUrl} className="max-w-full" />
+              ) : a.dataBase64 && (a.kind === 'image' || a.kind === 'audio') ? (
+                <DataMedia key={a.localId} mime={a.mime} base64={a.dataBase64} name={a.name} />
+              ) : (
+                <FileChip key={a.localId} name={a.name} />
+              )
+            )}
+          </div>
+        ) : null}
+        {text && <div className="rounded-2xl rounded-br-md bg-secondary px-4 py-2.5 text-[15px] leading-6 break-words whitespace-pre-wrap">{text}</div>}
+        {onEdit && (
+          <Button variant="ghost" size="icon" className="size-6 opacity-0 group-hover:opacity-100" onClick={onEdit} aria-label="Edit message">
+            <Pencil className="size-3.5" />
+          </Button>
+        )}
+      </div>
     </div>
   )
 }
@@ -134,7 +174,7 @@ function CouncilPanel({ answers }: { answers: CouncilAnswer[] }): React.JSX.Elem
   )
 }
 
-export function AssistantMessage({ view }: { view: AssistantView }): React.JSX.Element {
+export function AssistantMessage({ view, onRegenerate }: { view: AssistantView; onRegenerate?: () => void }): React.JSX.Element {
   const providers = useProviders()
   const fallbacks = (view.attempts ?? []).filter((a) => a.error)
   const copy = (): void => {
@@ -144,6 +184,10 @@ export function AssistantMessage({ view }: { view: AssistantView }): React.JSX.E
     <div className="group flex flex-col gap-2">
       {view.council && view.council.length > 0 && <CouncilPanel answers={view.council} />}
       {view.steps?.map((s) => <ToolStepCard key={s.id} step={s} approvalId={view.approvals?.[s.id]} />)}
+      {view.media?.map((m, i) => (
+        <DataMedia key={`live-${i}`} mime={m.mime} base64={m.base64} name={m.name} />
+      ))}
+      {view.chatId && view.attachments?.map((a) => <MediaFile key={a.id} chatId={view.chatId!} attachment={a} />)}
       {view.content && <Markdown text={view.content} />}
       {view.streaming && !view.error && (
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
@@ -157,7 +201,7 @@ export function AssistantMessage({ view }: { view: AssistantView }): React.JSX.E
           <span className="break-words">{view.error}</span>
         </div>
       )}
-      {(view.providerId || view.content) && (
+      {(view.providerId || view.content || view.attachments?.length || view.media?.length) && (
         <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
           {view.providerId && (
             <Badge variant="outline" className="font-normal">
@@ -185,6 +229,11 @@ export function AssistantMessage({ view }: { view: AssistantView }): React.JSX.E
           {!view.streaming && view.content && (
             <Button variant="ghost" size="icon" className="size-6 opacity-0 group-hover:opacity-100" onClick={copy} aria-label="Copy reply">
               <Copy className="size-3.5" />
+            </Button>
+          )}
+          {onRegenerate && !view.streaming && (
+            <Button variant="ghost" size="icon" className="size-6 opacity-0 group-hover:opacity-100" onClick={onRegenerate} aria-label="Regenerate reply">
+              <RefreshCw className="size-3.5" />
             </Button>
           )}
         </div>

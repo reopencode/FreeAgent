@@ -1,17 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ChatMode, StoredMessage } from '@core/api-types'
 import { useQueryClient } from '@tanstack/react-query'
-import { Code2, FolderKanban, Globe, Loader2, Newspaper, Sparkles, TriangleAlert } from 'lucide-react'
+import { Code2, Download, FolderKanban, Globe, Loader2, Newspaper, Sparkles, TriangleAlert, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Composer } from '@/components/chat/Composer'
+import { bytesToBase64, providerProblem, type DraftAttachment } from '@/components/chat/draft'
 import { AssistantMessage, UserMessage, type AssistantView } from '@/components/chat/Messages'
-import { api } from '@/lib/api'
+import { api, connection } from '@/lib/api'
 import { useNav } from '@/lib/nav'
 import { keys, useChat, useProject, useProviders } from '@/lib/queries'
-import { startReply, stopReply, useLiveReply } from '@/lib/streams'
+import { startEdit, startRegenerate, startReply, stopReply, useLiveReply } from '@/lib/streams'
 
 const SUGGESTIONS = [
   { icon: Code2, text: 'Write a Python script that renames photos by the date they were taken', mode: 'agent' as ChatMode },
@@ -44,7 +45,9 @@ function toView(m: StoredMessage): AssistantView {
     steps: m.meta.steps,
     council: m.meta.council,
     error: m.meta.error,
-    durationMs: m.meta.durationMs
+    durationMs: m.meta.durationMs,
+    chatId: m.chatId,
+    attachments: m.attachments
   }
 }
 
@@ -58,6 +61,7 @@ export function ChatView({ chatId, projectId }: { chatId?: string; projectId?: s
   const [mode, setMode] = useState<ChatMode>(lastUsed().mode)
   const [target, setTarget] = useState<string>(lastUsed().target)
   const [draft, setDraft] = useState<string | undefined>()
+  const [editing, setEditing] = useState<{ messageId: string; text: string; attachments: DraftAttachment[] } | null>(null)
   const [creating, setCreating] = useState(false)
   const scroller = useRef<HTMLDivElement>(null)
   const stick = useRef(true)
@@ -87,15 +91,42 @@ export function ChatView({ chatId, projectId }: { chatId?: string; projectId?: s
 
   const readyReal = (providers.data ?? []).filter((p) => p.enabled && p.status.state === 'ready' && p.id !== 'mock')
 
-  const send = async (text: string): Promise<void> => {
+  const payload = (text: string, attachments: DraftAttachment[]) => ({
+    content: text,
+    mode,
+    target,
+    drafts: attachments,
+    attachments: attachments.map(({ name, mime, dataBase64 }) => ({ name, mime, dataBase64 }))
+  })
+
+  const send = async (text: string, attachments: DraftAttachment[]): Promise<void> => {
+    if (providers.data) {
+      const problem = providerProblem(target, providers.data, attachments)
+      if (problem) {
+        toast.error(problem)
+        return
+      }
+    }
+    const body = payload(text, attachments)
+    if (editing && chatId) {
+      const messageId = editing.messageId
+      qc.setQueryData(keys.chat(chatId), (old: { chat: unknown; messages: StoredMessage[]; running: boolean } | undefined) => {
+        if (!old) return old
+        const idx = old.messages.findIndex((m) => m.id === messageId)
+        return idx < 0 ? old : { ...old, messages: old.messages.slice(0, idx) }
+      })
+      startEdit(chatId, { ...body, messageId })
+      setEditing(null)
+      return
+    }
     if (chatId) {
-      startReply(chatId, { content: text, mode, target })
+      startReply(chatId, body)
       return
     }
     setCreating(true)
     try {
       const c = await api.post<{ id: string }>('/api/chats', { projectId: projectId ?? null, mode, target })
-      startReply(c.id, { content: text, mode, target })
+      startReply(c.id, body)
       void qc.invalidateQueries({ queryKey: keys.chats })
       go({ view: 'chat', chatId: c.id })
     } catch (e) {
@@ -104,17 +135,69 @@ export function ChatView({ chatId, projectId }: { chatId?: string; projectId?: s
     }
   }
 
+  const beginEdit = async (m: StoredMessage): Promise<void> => {
+    const c = connection()
+    const attachments: DraftAttachment[] = []
+    for (const a of m.attachments ?? []) {
+      const res = await fetch(`${c.baseUrl}/api/media/${m.chatId}/${a.id}`, { headers: { Authorization: `Bearer ${c.token}` } })
+      if (!res.ok) continue
+      const bytes = new Uint8Array(await res.arrayBuffer())
+      attachments.push({
+        localId: a.id,
+        name: a.name,
+        mime: a.mime,
+        kind: a.kind,
+        dataBase64: bytesToBase64(bytes),
+        previewUrl: a.kind === 'image' || a.kind === 'audio' ? URL.createObjectURL(new Blob([bytes], { type: a.mime })) : undefined
+      })
+    }
+    setEditing({ messageId: m.id, text: m.content, attachments })
+  }
+
+  const exportChat = async (): Promise<void> => {
+    if (!chatId) return
+    try {
+      const c = connection()
+      const res = await fetch(`${c.baseUrl}/api/chats/${chatId}/export`, { headers: { Authorization: `Bearer ${c.token}` } })
+      if (!res.ok) throw new Error('Could not export this chat')
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      const title = chat.data?.chat.title ?? 'chat'
+      link.download = `${title.replace(/[^\w.-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80) || 'chat'}.md`
+      link.click()
+      URL.revokeObjectURL(url)
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : String(e))
+    }
+  }
+
+  const regenerate = (): void => {
+    if (!chatId) return
+    const lastUser = [...messages].reverse().find((m) => m.role === 'user')
+    if (!lastUser) return
+    qc.setQueryData(keys.chat(chatId), (old: { chat: unknown; messages: StoredMessage[]; running: boolean } | undefined) => {
+      if (!old) return old
+      const idx = old.messages.findIndex((m) => m.id === lastUser.id)
+      return idx < 0 ? old : { ...old, messages: old.messages.slice(0, idx + 1) }
+    })
+    startRegenerate(chatId, { mode, target })
+  }
+
   const composer = (
     <Composer
+      key={editing?.messageId ?? 'compose'}
       mode={mode}
       target={target}
       onModeChange={changeMode}
       onTargetChange={changeTarget}
-      onSend={(t) => void send(t)}
+      onSend={(t, files) => void send(t, files)}
       onStop={() => chatId && stopReply(chatId)}
       busy={!!live || creating}
       autoFocus
-      initialText={draft}
+      initialText={editing?.text ?? draft}
+      initialAttachments={editing?.attachments}
       placeholder={chatId ? 'Reply…' : mode === 'agent' ? 'Describe a task. The agent can use files, the shell, the web and coding agents…' : undefined}
     />
   )
@@ -166,12 +249,17 @@ export function ChatView({ chatId, projectId }: { chatId?: string; projectId?: s
     )
   }
 
-  const showLiveUser = live && !messages.some((m) => m.id === live.userMessageId)
+  const lastUserId = [...messages].reverse().find((m) => m.role === 'user')?.id
+  const lastAssistantId = [...messages].reverse().find((m) => m.role === 'assistant')?.id
+  const showLiveUser = !!live?.userText && !messages.some((m) => m.id === live?.userMessageId)
 
   return (
     <div className="flex h-full flex-col">
       <header className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
         <h2 className="min-w-0 flex-1 truncate text-sm font-medium">{chat.data?.chat.title ?? ' '}</h2>
+        <Button variant="ghost" size="icon" className="size-8 text-muted-foreground" onClick={() => void exportChat()} aria-label="Export chat">
+          <Download />
+        </Button>
         {project.data && (
           <Button variant="ghost" size="sm" className="text-muted-foreground" onClick={() => go({ view: 'projects', projectId: project.data!.project.id })}>
             <FolderKanban />
@@ -202,13 +290,26 @@ export function ChatView({ chatId, projectId }: { chatId?: string; projectId?: s
               </Button>
             </div>
           )}
-          {messages.map((m) => (m.role === 'user' ? <UserMessage key={m.id} text={m.content} /> : <AssistantMessage key={m.id} view={toView(m)} />))}
+          {messages.map((m) =>
+            m.role === 'user' ? (
+              <UserMessage
+                key={m.id}
+                text={m.content}
+                chatId={chatId}
+                attachments={m.attachments}
+                onEdit={!live && m.id === lastUserId ? () => void beginEdit(m) : undefined}
+              />
+            ) : (
+              <AssistantMessage key={m.id} view={toView(m)} onRegenerate={!live && m.id === lastAssistantId ? regenerate : undefined} />
+            )
+          )}
           {live && (
             <>
-              {showLiveUser && <UserMessage text={live.userText} />}
+              {showLiveUser && <UserMessage text={live.userText} drafts={live.drafts} />}
               <AssistantMessage
                 view={{
                   content: live.content,
+                  chatId,
                   providerId: live.providerId,
                   model: live.model,
                   attempts: live.attempts,
@@ -217,6 +318,7 @@ export function ChatView({ chatId, projectId }: { chatId?: string; projectId?: s
                   error: live.error,
                   status: live.status,
                   approvals: live.approvals,
+                  media: live.media,
                   streaming: true
                 }}
               />
@@ -226,6 +328,14 @@ export function ChatView({ chatId, projectId }: { chatId?: string; projectId?: s
       </div>
       <div className="shrink-0 px-4 pb-4">
         <div className="mx-auto w-full max-w-3xl">
+          {editing && (
+            <div className="mb-2 flex items-center justify-between rounded-lg border px-3 py-1.5 text-xs text-muted-foreground">
+              Editing your last message
+              <Button variant="ghost" size="icon" className="size-6" onClick={() => setEditing(null)} aria-label="Cancel edit">
+                <X />
+              </Button>
+            </div>
+          )}
           {composer}
           <p className="mt-2 flex items-center justify-center gap-1 text-center text-[11px] text-muted-foreground">
             {live ? <Loader2 className="size-3 animate-spin" /> : null}

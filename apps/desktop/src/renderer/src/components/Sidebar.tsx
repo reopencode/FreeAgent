@@ -1,6 +1,6 @@
-import { useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Clock, FolderKanban, MessageSquarePlus, MoreHorizontal, PanelLeftClose, SlidersHorizontal, Trash2 } from 'lucide-react'
+import { Clock, FolderKanban, MessageSquarePlus, MoreHorizontal, PanelLeftClose, Search, SlidersHorizontal, Trash2 } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
@@ -31,7 +31,13 @@ function groupByDay(ts: number): string {
 
 export function Sidebar({ onHide }: { onHide?: () => void }): React.JSX.Element {
   const { route, go } = useNav()
-  const chats = useChats()
+  const [query, setQuery] = useState('')
+  const [debounced, setDebounced] = useState('')
+  useEffect(() => {
+    const timer = setTimeout(() => setDebounced(query.trim()), 200)
+    return () => clearTimeout(timer)
+  }, [query])
+  const chats = useChats(debounced)
   const providers = useProviders()
   const qc = useQueryClient()
 
@@ -89,6 +95,16 @@ export function Sidebar({ onHide }: { onHide?: () => void }): React.JSX.Element 
       </nav>
 
       <div className="mt-4 px-4 pb-1 text-xs font-medium text-muted-foreground">Recents</div>
+      <div className="relative mx-2 mb-1">
+        <Search className="pointer-events-none absolute top-2 left-2 size-3.5 text-muted-foreground" />
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search chats"
+          aria-label="Search chats"
+          className="h-8 w-full rounded-md border bg-transparent pr-2 pl-7 text-sm outline-none placeholder:text-muted-foreground"
+        />
+      </div>
       <ScrollArea className="min-h-0 flex-1 px-2">
         {chats.isLoading && (
           <div className="flex flex-col gap-2 px-2 py-1">
@@ -98,7 +114,9 @@ export function Sidebar({ onHide }: { onHide?: () => void }): React.JSX.Element 
           </div>
         )}
         {chats.isError && <p className="px-2 py-1 text-xs text-destructive">Could not load chats.</p>}
-        {chats.data?.length === 0 && <p className="px-2 py-1 text-xs text-muted-foreground">Your conversations will show up here.</p>}
+        {chats.data?.length === 0 && (
+          <p className="px-2 py-1 text-xs text-muted-foreground">{debounced ? 'No chats match that search.' : 'Your conversations will show up here.'}</p>
+        )}
         {groups.map((g) => (
           <div key={g.label} className="mb-2">
             <div className="px-2 pt-2 pb-1 text-[11px] text-muted-foreground/80">{g.label}</div>

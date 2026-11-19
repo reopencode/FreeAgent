@@ -63,6 +63,24 @@ export interface MessageMeta {
   durationMs?: number
 }
 
+export type AttachmentKind = 'image' | 'audio' | 'file'
+
+/** A file saved next to a chat. The bytes live under `chat-media/`, not in SQLite. */
+export interface Attachment {
+  id: string
+  kind: AttachmentKind
+  name: string
+  mime: string
+  bytes: number
+}
+
+/** Attachment payload on a message POST. The server writes it to disk and stores {@link Attachment}. */
+export interface IncomingAttachment {
+  name: string
+  mime: string
+  dataBase64: string
+}
+
 export interface StoredMessage {
   id: string
   chatId: string
@@ -70,6 +88,7 @@ export interface StoredMessage {
   content: string
   toolCalls: { id: string; name: string; arguments: string }[] | null
   toolCallId: string | null
+  attachments?: Attachment[]
   meta: MessageMeta
   createdAt: number
 }
@@ -182,6 +201,7 @@ export type AgentEvent =
   | { type: 'route'; providerId: string; model?: string; attempt: number }
   | { type: 'fallback'; providerId: string; model?: string; error: string }
   | { type: 'text'; text: string; replace?: boolean }
+  | { type: 'media'; mime: string; name?: string; base64: string }
   | { type: 'status'; message: string }
   | { type: 'step_start'; step: number }
   | { type: 'tool_call'; id: string; name: string; args: string }

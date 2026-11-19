@@ -1,6 +1,6 @@
 import type { AgentEvent, ChatMode, CouncilAnswer, MessageMeta, RouteAttempt, ToolStep } from '../api-types'
 import type { ProviderRegistry } from '../providers/registry'
-import { Router, type RouterEvent } from '../router'
+import { NoProviderError, Router, type RouterEvent } from '../router'
 import type { Store } from '../store'
 import type { ChatMessage, ToolCall } from '../types'
 import { applyTextDelta, id, safeJson, truncate } from '../util'
@@ -19,11 +19,17 @@ export interface RunInput {
   autoApprove?: boolean
   maxSteps?: number
   councilSize?: number
+  /** Conversation includes an image, so the router skips providers that cannot see it. */
+  images?: boolean
+  /** Conversation includes audio, so Auto is limited to Gemini. */
+  audio?: boolean
 }
 
 export interface RunResult {
   text: string
   meta: MessageMeta
+  /** Images and audio the provider returned. The chat service saves the bytes. */
+  media?: { mime: string; name?: string; base64: string }[]
 }
 
 export interface RunnerDeps {
@@ -38,6 +44,15 @@ const TOOL_RESULT_LIMIT = 12_000
 
 export class AgentRunner {
   constructor(private readonly deps: RunnerDeps) {}
+
+  /** Rejects a turn whose images or audio cannot be sent to the chosen target. */
+  async ensureMedia(target: string, flags: { images?: boolean; audio?: boolean }): Promise<void> {
+    if (!flags.images && !flags.audio) return
+    const list = await this.deps.router.candidates({ target, images: flags.images, audio: flags.audio })
+    if (list.length) return
+    if (flags.audio) throw new NoProviderError('No ready provider accepts audio. Add a Gemini API key, or pick an API provider that accepts it.')
+    throw new NoProviderError('No ready provider accepts images. Website and app providers cannot take them.')
+  }
 
   async tools(): Promise<AgentTool[]> {
     const mcpTools = (await this.deps.mcp?.tools().catch(() => [])) ?? []
@@ -63,22 +78,32 @@ export class AgentRunner {
       if (last) last.error = ev.error
       input.emit({ type: 'fallback', providerId: ev.providerId, model: ev.model, error: ev.error })
     } else if (ev.type === 'text') input.emit({ type: 'text', text: ev.text, replace: ev.replace })
+    else if (ev.type === 'media') input.emit({ type: 'media', mime: ev.mime, name: ev.name, base64: ev.base64 })
     else if (ev.type === 'status') input.emit({ type: 'status', message: ev.message })
+  }
+
+  private routeFlags(input: RunInput): { images?: boolean; audio?: boolean } {
+    return { images: input.images, audio: input.audio }
   }
 
   private async chat(input: RunInput): Promise<RunResult> {
     const meta: MessageMeta = {}
     const attempts: RouteAttempt[] = []
     let text = ''
+    const media: { mime: string; name?: string; base64: string }[] = []
     // A saved chat keeps one website conversation open across turns, so its id is the session id.
     // The session ends when the chat is deleted (see DELETE /api/chats/:id), not when this turn finishes.
-    for await (const ev of this.deps.router.chat(input.messages, { target: input.target, signal: input.signal, cwd: input.cwd, sessionId: input.chatId })) {
+    for await (const ev of this.deps.router.chat(input.messages, { target: input.target, signal: input.signal, cwd: input.cwd, sessionId: input.chatId, ...this.routeFlags(input) })) {
       this.track(ev, input, meta, attempts)
-      if (ev.type === 'route') text = ''
+      if (ev.type === 'route') {
+        text = ''
+        media.length = 0
+      }
       if (ev.type === 'text') text = applyTextDelta(text, ev)
+      if (ev.type === 'media') media.push({ mime: ev.mime, name: ev.name, base64: ev.base64 })
     }
     meta.attempts = attempts
-    return { text, meta }
+    return { text, meta, media: [...media] }
   }
 
   private async agent(input: RunInput): Promise<RunResult> {
@@ -91,6 +116,7 @@ export class AgentRunner {
     const maxSteps = input.maxSteps ?? 12
     let target = input.target
     let finalText = ''
+    const media: { mime: string; name?: string; base64: string }[] = []
     // One id for the whole run lets web providers keep a single site conversation open across steps.
     // A saved chat uses its own id, so its agent turns continue that conversation; the chat's deletion ends it.
     const sessionId = input.chatId ?? id('run_')
@@ -100,12 +126,18 @@ export class AgentRunner {
         input.emit({ type: 'step_start', step })
         let text = ''
         const calls: ToolCall[] = []
-        for await (const ev of this.deps.router.chat(convo, { target, tools: specs, signal: input.signal, cwd: input.cwd, sessionId })) {
+        const stepMedia: { mime: string; name?: string; base64: string }[] = []
+        for await (const ev of this.deps.router.chat(convo, { target, tools: specs, signal: input.signal, cwd: input.cwd, sessionId, ...this.routeFlags(input) })) {
           this.track(ev, input, meta, attempts)
-          if (ev.type === 'route') text = ''
+          if (ev.type === 'route') {
+            text = ''
+            stepMedia.length = 0
+          }
           if (ev.type === 'text') text = applyTextDelta(text, ev)
           if (ev.type === 'tool_call') calls.push(ev.call)
+          if (ev.type === 'media') stepMedia.push({ mime: ev.mime, name: ev.name, base64: ev.base64 })
         }
+        media.push(...stepMedia)
         // Keep the rest of the run on the provider that answered so tool context stays consistent.
         if (meta.providerId && step === 0 && this.deps.registry.get(meta.providerId)?.kind !== 'app') {
           target = meta.model ? `${meta.providerId}::${meta.model}` : meta.providerId
@@ -128,7 +160,7 @@ export class AgentRunner {
       if (!input.chatId) await this.deps.registry.endSession(sessionId)
     }
     meta.attempts = attempts
-    return { text: finalText, meta }
+    return { text: finalText, meta, media }
   }
 
   private async runTool(call: ToolCall, tool: AgentTool | undefined, input: RunInput, steps: ToolStep[]): Promise<string> {
@@ -170,7 +202,7 @@ export class AgentRunner {
     const meta: MessageMeta = { council: [] }
     const size = Math.max(2, Math.min(input.councilSize ?? 3, 5))
     const parsed = input.target.startsWith('auto') ? input.target : 'auto'
-    const candidates = (await this.deps.router.candidates({ target: parsed })).slice(0, size)
+    const candidates = (await this.deps.router.candidates({ target: parsed, ...this.routeFlags(input) })).slice(0, size)
     if (!candidates.length) throw new Error('No provider is ready for council mode.')
     input.emit({ type: 'status', message: `Asking ${candidates.map((c) => c.provider.name).join(', ')}…` })
 
@@ -194,7 +226,7 @@ export class AgentRunner {
       input.emit({ type: 'text', text: good[0].text })
       meta.providerId = good[0].providerId
       meta.model = good[0].model
-      return { text: good[0].text, meta }
+      return { text: good[0].text, meta, media: [] }
     }
 
     const question = [...input.messages].reverse().find((m) => m.role === 'user')?.content ?? ''
@@ -214,12 +246,17 @@ export class AgentRunner {
     input.emit({ type: 'status', message: 'Merging the answers…' })
     const attempts: RouteAttempt[] = []
     let text = ''
-    for await (const ev of this.deps.router.chat(judgePrompt, { target: good[0].providerId, signal: input.signal })) {
+    const media: { mime: string; name?: string; base64: string }[] = []
+    for await (const ev of this.deps.router.chat(judgePrompt, { target: good[0].providerId, signal: input.signal, ...this.routeFlags(input) })) {
       this.track(ev, input, meta, attempts)
-      if (ev.type === 'route') text = ''
+      if (ev.type === 'route') {
+        text = ''
+        media.length = 0
+      }
       if (ev.type === 'text') text = applyTextDelta(text, ev)
+      if (ev.type === 'media') media.push({ mime: ev.mime, name: ev.name, base64: ev.base64 })
     }
     meta.attempts = attempts
-    return { text, meta }
+    return { text, meta, media: [...media] }
   }
 }

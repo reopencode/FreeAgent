@@ -48,17 +48,81 @@ export interface OpenAICompatibleConfig {
   tags?: CapabilityTag[]
 }
 
+interface OpenAIContentPart {
+  type?: string
+  text?: string
+  image_url?: { url?: string }
+  input_audio?: { data?: string }
+  b64_json?: string
+}
+
 interface OpenAIStreamChunk {
   choices?: {
     delta?: {
-      content?: string | null
+      content?: string | null | OpenAIContentPart[]
       reasoning?: string | null
+      images?: { image_url?: { url?: string }; b64_json?: string }[]
+      audio?: { data?: string }
       tool_calls?: { index: number; id?: string; function?: { name?: string; arguments?: string } }[]
     }
     finish_reason?: string | null
   }[]
   usage?: { prompt_tokens?: number; completion_tokens?: number }
   error?: { message?: string; code?: number | string }
+}
+
+function audioFormat(mime: string, name: string): string {
+  const s = `${mime} ${name}`.toLowerCase()
+  if (s.includes('wav')) return 'wav'
+  if (s.includes('mpeg') || s.includes('mp3')) return 'mp3'
+  if (s.includes('webm')) return 'webm'
+  if (s.includes('ogg')) return 'ogg'
+  if (s.includes('mp4') || s.includes('m4a')) return 'mp4'
+  return 'wav'
+}
+
+function dataUrl(url: string): { mime: string; base64: string } | undefined {
+  const m = /^data:([^;,]+);base64,([A-Za-z0-9+/=\s]+)$/.exec(url.trim())
+  if (!m) return undefined
+  return { mime: m[1], base64: m[2].replace(/\s/g, '') }
+}
+
+/** Pulls image and audio payloads out of one streaming delta. Text stays on `delta.content`. */
+export function mediaFromOpenAIDelta(delta: NonNullable<NonNullable<OpenAIStreamChunk['choices']>[number]['delta']> | undefined): { mime: string; base64: string }[] {
+  if (!delta) return []
+  const out: { mime: string; base64: string }[] = []
+  const take = (url?: string, b64?: string, mime = 'image/png'): void => {
+    if (b64) out.push({ mime, base64: b64 })
+    else if (url) {
+      const parsed = dataUrl(url)
+      if (parsed) out.push(parsed)
+    }
+  }
+  for (const image of delta.images ?? []) take(image.image_url?.url, image.b64_json)
+  if (delta.audio?.data) out.push({ mime: 'audio/mpeg', base64: delta.audio.data })
+  if (Array.isArray(delta.content)) {
+    for (const part of delta.content) {
+      if (part.image_url?.url || part.b64_json) take(part.image_url?.url, part.b64_json)
+      else if (part.input_audio?.data) out.push({ mime: 'audio/wav', base64: part.input_audio.data })
+    }
+  }
+  return out
+}
+
+function openAIContent(m: ChatMessage): unknown {
+  const parts: unknown[] = []
+  if (m.content) parts.push({ type: 'text', text: m.content })
+  for (const a of m.attachments ?? []) {
+    if (a.kind === 'image') {
+      const url = a.url ?? (a.dataBase64 ? `data:${a.mime || 'image/png'};base64,${a.dataBase64}` : undefined)
+      if (url) parts.push({ type: 'image_url', image_url: { url } })
+    } else if (a.kind === 'audio' && a.dataBase64) {
+      parts.push({ type: 'input_audio', input_audio: { data: a.dataBase64, format: audioFormat(a.mime, a.name) } })
+    }
+  }
+  if (!parts.length) return m.content
+  if (parts.length === 1 && m.content && !(m.attachments?.length)) return m.content
+  return parts
 }
 
 export function toOpenAIMessages(messages: ChatMessage[]): unknown[] {
@@ -71,7 +135,7 @@ export function toOpenAIMessages(messages: ChatMessage[]): unknown[] {
         tool_calls: m.toolCalls.map((c) => ({ id: c.id, type: 'function', function: { name: c.name, arguments: c.arguments || '{}' } }))
       }
     }
-    return { role: m.role, content: m.content }
+    return { role: m.role, content: openAIContent(m) }
   })
 }
 
@@ -213,7 +277,11 @@ export class OpenAICompatibleProvider implements Provider {
       }
       const choice = chunk.choices?.[0]
       const delta = choice?.delta
-      if (delta?.content) yield { type: 'text', text: delta.content }
+      if (typeof delta?.content === 'string' && delta.content) yield { type: 'text', text: delta.content }
+      else if (Array.isArray(delta?.content)) {
+        for (const part of delta.content) if (part.text) yield { type: 'text', text: part.text }
+      }
+      for (const media of mediaFromOpenAIDelta(delta)) yield { type: 'media', ...media }
       for (const tc of delta?.tool_calls ?? []) {
         const cur = pending.get(tc.index) ?? { id: tc.id ?? `call_${tc.index}_${Date.now()}`, name: '', arguments: '' }
         if (tc.id) cur.id = tc.id

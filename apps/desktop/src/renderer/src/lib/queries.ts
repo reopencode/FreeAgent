@@ -47,7 +47,11 @@ export const keys = {
   tools: ['tools'] as const
 }
 
-export const useChats = () => useQuery({ queryKey: keys.chats, queryFn: () => api.get<Chat[]>('/api/chats?limit=60') })
+export const useChats = (query = '') =>
+  useQuery({
+    queryKey: [...keys.chats, query],
+    queryFn: () => api.get<Chat[]>(`/api/chats?limit=60${query ? `&q=${encodeURIComponent(query)}` : ''}`)
+  })
 export const useChat = (id: string | undefined) =>
   useQuery({
     queryKey: keys.chat(id ?? ''),
