@@ -10,6 +10,7 @@ import type {
   Chat,
   ChatMode,
   McpServerConfig,
+  MemoryFact,
   MessageMeta,
   Project,
   ProjectFile,
@@ -115,7 +116,16 @@ const MIGRATIONS: string[] = [
     enabled INTEGER NOT NULL DEFAULT 1
   );
   `,
-  `ALTER TABLE messages ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]';`
+  `ALTER TABLE messages ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]';`,
+  `
+  ALTER TABLE projects ADD COLUMN enabled_plugins TEXT NOT NULL DEFAULT '[]';
+  ALTER TABLE chats ADD COLUMN plugin_ids TEXT;
+  CREATE TABLE memories (
+    id TEXT PRIMARY KEY,
+    text TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  );
+  `
 ]
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -188,16 +198,18 @@ export class Store {
       description: input.description ?? '',
       instructions: input.instructions ?? '',
       workspaceDir: input.workspaceDir ?? null,
+      enabledPlugins: input.enabledPlugins ?? [],
       createdAt: t,
       updatedAt: t
     }
     this.run(
-      'INSERT INTO projects (id, name, description, instructions, workspace_dir, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      'INSERT INTO projects (id, name, description, instructions, workspace_dir, enabled_plugins, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
       p.id,
       p.name,
       p.description,
       p.instructions,
       p.workspaceDir,
+      JSON.stringify(p.enabledPlugins),
       t,
       t
     )
@@ -209,11 +221,12 @@ export class Store {
     if (!p) return undefined
     const next = { ...p, ...patch, id: p.id, updatedAt: now() }
     this.run(
-      'UPDATE projects SET name = ?, description = ?, instructions = ?, workspace_dir = ?, updated_at = ? WHERE id = ?',
+      'UPDATE projects SET name = ?, description = ?, instructions = ?, workspace_dir = ?, enabled_plugins = ?, updated_at = ? WHERE id = ?',
       next.name,
       next.description,
       next.instructions,
       next.workspaceDir,
+      JSON.stringify(next.enabledPlugins ?? []),
       next.updatedAt,
       p.id
     )
@@ -270,6 +283,7 @@ export class Store {
       title: input.title || 'New chat',
       mode: input.mode ?? 'chat',
       target: input.target ?? 'auto',
+      pluginIds: null,
       createdAt: t,
       updatedAt: t
     }
@@ -286,16 +300,17 @@ export class Store {
     return c
   }
 
-  updateChat(chatId: string, patch: Partial<Pick<Chat, 'title' | 'mode' | 'target' | 'projectId'>>): Chat | undefined {
+  updateChat(chatId: string, patch: Partial<Pick<Chat, 'title' | 'mode' | 'target' | 'projectId' | 'pluginIds'>>): Chat | undefined {
     const c = this.getChat(chatId)
     if (!c) return undefined
     const next = { ...c, ...patch, updatedAt: now() }
     this.run(
-      'UPDATE chats SET title = ?, mode = ?, target = ?, project_id = ?, updated_at = ? WHERE id = ?',
+      'UPDATE chats SET title = ?, mode = ?, target = ?, project_id = ?, plugin_ids = ?, updated_at = ? WHERE id = ?',
       next.title,
       next.mode,
       next.target,
       next.projectId,
+      next.pluginIds == null ? null : JSON.stringify(next.pluginIds),
       next.updatedAt,
       c.id
     )
@@ -539,6 +554,50 @@ export class Store {
     }
   }
 
+  // Memory
+
+  listMemories(): MemoryFact[] {
+    return this.all('SELECT * FROM memories ORDER BY created_at, rowid').map((r) => ({
+      id: String(r.id),
+      text: String(r.text),
+      createdAt: Number(r.created_at)
+    }))
+  }
+
+  addMemory(text: string): MemoryFact {
+    const clean = text.trim().slice(0, 240)
+    if (!clean) throw new Error('Nothing to remember')
+    const existing = this.listMemories().find((m) => m.text === clean)
+    if (existing) return existing
+    const rows = this.listMemories()
+    while (rows.length >= 40) {
+      this.deleteMemory(rows[0].id)
+      rows.shift()
+    }
+    const fact: MemoryFact = { id: id('mem_'), text: clean, createdAt: now() }
+    this.run('INSERT INTO memories (id, text, created_at) VALUES (?, ?, ?)', fact.id, fact.text, fact.createdAt)
+    return fact
+  }
+
+  deleteMemory(memoryId: string): void {
+    this.run('DELETE FROM memories WHERE id = ?', memoryId)
+  }
+
+  forgetMemory(query: { id?: string; text?: string }): boolean {
+    if (query.id) {
+      const row = this.get('SELECT id FROM memories WHERE id = ?', query.id)
+      if (!row) return false
+      this.deleteMemory(query.id)
+      return true
+    }
+    const text = query.text?.trim()
+    if (!text) return false
+    const row = this.get('SELECT id FROM memories WHERE text = ?', text.slice(0, 240))
+    if (!row) return false
+    this.deleteMemory(String(row.id))
+    return true
+  }
+
   // MCP servers
 
   listMcpServers(): McpServerConfig[] {
@@ -591,6 +650,7 @@ function toProject(r: Row): Project {
     description: String(r.description ?? ''),
     instructions: String(r.instructions ?? ''),
     workspaceDir: (r.workspace_dir as string | null) ?? null,
+    enabledPlugins: safeJson<string[]>(r.enabled_plugins == null ? '[]' : String(r.enabled_plugins), []),
     createdAt: Number(r.created_at),
     updatedAt: Number(r.updated_at)
   }
@@ -608,6 +668,7 @@ function toChat(r: Row): Chat {
     title: String(r.title),
     mode: String(r.mode) as ChatMode,
     target: String(r.target),
+    pluginIds: r.plugin_ids == null ? null : safeJson<string[]>(String(r.plugin_ids), []),
     createdAt: Number(r.created_at),
     updatedAt: Number(r.updated_at)
   }

@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from 'react'
-import type { AgentEvent, ChatMode, CouncilAnswer, RouteAttempt, ToolStep } from '@core/api-types'
+import type { AgentEvent, AgentTask, ChatMode, CouncilAnswer, RouteAttempt, ToolStep } from '@core/api-types'
 import { toast } from 'sonner'
 import type { DraftAttachment } from '@/components/chat/draft'
 import { api, streamEdit, streamMessage, streamRegenerate, type ChatStreamBody } from './api'
@@ -17,6 +17,7 @@ export interface LiveReply {
   model?: string
   attempts: RouteAttempt[]
   steps: ToolStep[]
+  tasks: AgentTask[]
   council: CouncilAnswer[]
   /** toolCallId → approval id while waiting for the user. */
   approvals: Record<string, string>
@@ -84,6 +85,8 @@ function apply(r: LiveReply, ev: AgentEvent): LiveReply {
         steps: r.steps.map((s) => (s.id === toolCallId ? { ...s, status: ev.approved ? 'running' : 'denied' } : s))
       }
     }
+    case 'task_list':
+      return { ...r, tasks: ev.tasks }
     case 'tool_result':
       return {
         ...r,
@@ -110,7 +113,7 @@ function begin(chatId: string, userText: string, drafts: DraftAttachment[] | und
   if (controllers.has(chatId)) return
   const controller = new AbortController()
   controllers.set(chatId, controller)
-  live.set(chatId, { chatId, userText, drafts, content: '', attempts: [], steps: [], council: [], approvals: {}, media: [], startedAt: Date.now() })
+  live.set(chatId, { chatId, userText, drafts, content: '', attempts: [], steps: [], tasks: [], council: [], approvals: {}, media: [], startedAt: Date.now() })
   emit()
   let unseenError: string | undefined
   run(

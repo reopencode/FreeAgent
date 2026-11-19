@@ -237,6 +237,11 @@ Checked against the current app. Shipped behavior stays in the sections above.
 - [x] **Approvals.** Writing a file, running a command and handing work to a coding app wait for **Allow** or **Deny**, unless auto-approve is on.
 - [x] **Step cap.** Agent mode stops after the step limit in Customize (default 12) and says so.
 - [x] **Your own MCP servers.** A stdio or HTTP MCP server added under Customize becomes extra agent tools.
+- [x] **Plugins, skills and rules.** `AGENTS.md` in the working folder is added to the prompt. Skills live in the data folder or in `.freeagent/skills`, and the agent reads one with `read_skill`. Plugins are instruction packs you turn on for a project or a chat, and the agent can turn one on or off for the current chat.
+- [x] **Split a large task first.** A long request, or one written as a list, is broken into a checklist before tools run. The agent works through that list in order. A short request stays a single run.
+- [x] **Memory across chats.** Facts you ask the agent to remember are kept on their own, separate from a project's instructions, and included in later chats. Customize can add or delete them.
+- [x] **Git tool.** `git_status` and `git_diff` are read-only. `git_commit` stages the paths you name and commits them inside the project folder, with the same approval prompt as a shell command.
+- [x] **Screenshots from the browser tool.** `browser_task` can return a screenshot. The image is shown on the reply. The model only receives a short note that the screenshot was taken.
 
 **Projects and automations**
 
@@ -254,14 +259,6 @@ Checked against the current app. Shipped behavior stays in the sections above.
 **Customize → General**
 
 - [x] **System prompt, theme and agent switches.** The system prompt is editable. Theme follows the OS, or stays light or dark. Also: auto-approve, fallback when a provider is picked by name, plain text to websites, council size and the agent step cap.
-
-### Agent
-
-- [ ] **Plugins, skills and rules.** Load project rules (such as `AGENTS.md`), reusable skills, and plugins the agent can turn on per chat or project. A project today has one instructions field and attached text files.
-- [ ] **Split a large task first.** Before tools run, break a large request into a visible list of small tasks and run them in order. The agent today plans in one prompt, may take up to the step cap, or hands the whole job to OpenCode, Kiro or Claude Code.
-- [ ] **Memory across chats.** Keep a small set of facts the user asked to remember, separate from one project’s instructions.
-- [ ] **Git tool.** Status, diff and commit inside the project folder, with the same approval prompt as shell commands.
-- [ ] **Screenshots from the browser tool.** `browser_task` returns page text or links. Also return a screenshot when the page is the answer.
 
 ### Website providers
 

@@ -2,8 +2,10 @@ import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'n
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { readPlugin, readSkill, type PluginDoc } from './instructions'
 import type { ProviderRegistry } from '../providers/registry'
 import { scratchBrowser } from '../providers/web/browser'
+import type { Store } from '../store'
 import type { ToolSpec } from '../types'
 import { applyTextDelta, htmlToText, runProcess, truncate, which } from '../util'
 
@@ -11,13 +13,24 @@ export interface ToolContext {
   cwd: string
   signal?: AbortSignal
   registry: ProviderRegistry
+  dataDir: string
+  store: Store
+  chatId?: string
 }
+
+export interface ToolImage {
+  mime: string
+  name?: string
+  base64: string
+}
+
+export type ToolResult = string | { text: string; images?: ToolImage[] }
 
 export interface AgentTool {
   spec: ToolSpec
   requiresApproval: boolean
   summarize(args: Record<string, unknown>): string
-  run(args: Record<string, unknown>, ctx: ToolContext): Promise<string>
+  run(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult>
 }
 
 const MAX_OUTPUT = 16_000
@@ -213,7 +226,7 @@ const browserTask: AgentTool = {
   spec: {
     name: 'browser_task',
     description:
-      'Open a page in a headless browser (runs JavaScript), optionally click/fill/press, then return the visible text or the links. Use for pages web_fetch cannot read.',
+      'Open a page in a headless browser (runs JavaScript), optionally click/fill/press, then return the visible text, the links, or a screenshot. Use for pages web_fetch cannot read. A screenshot is shown in the thread.',
     parameters: {
       type: 'object',
       properties: {
@@ -231,7 +244,7 @@ const browserTask: AgentTool = {
             required: ['type']
           }
         },
-        extract: { type: 'string', enum: ['text', 'links'] }
+        extract: { type: 'string', enum: ['text', 'links', 'screenshot'] }
       },
       required: ['url']
     }
@@ -255,6 +268,13 @@ const browserTask: AgentTool = {
       if (a.extract === 'links') {
         const links = await page.$$eval('a[href]', (els) => els.slice(0, 200).map((e) => `${(e as HTMLAnchorElement).innerText.trim().slice(0, 80)} — ${(e as HTMLAnchorElement).href}`))
         return truncate(links.join('\n'), MAX_OUTPUT)
+      }
+      if (a.extract === 'screenshot') {
+        const png = await page.screenshot({ type: 'png' })
+        return {
+          text: `Screenshot of ${page.url()} is shown in the thread.`,
+          images: [{ mime: 'image/png', name: 'screenshot.png', base64: Buffer.from(png).toString('base64') }]
+        }
       }
       return truncate(`${await page.title()}\n${page.url()}\n\n${await page.innerText('body')}`, MAX_OUTPUT)
     } finally {
@@ -295,4 +315,182 @@ const delegateToApp: AgentTool = {
   }
 }
 
-export const BUILTIN_TOOLS: AgentTool[] = [fsList, fsRead, fsWrite, shellExec, runCode, webFetch, webSearch, browserTask, delegateToApp]
+const gitEnv = (): NodeJS.ProcessEnv => ({
+  ...process.env,
+  GIT_AUTHOR_NAME: 'FreeAgent',
+  GIT_AUTHOR_EMAIL: 'freeagent@localhost',
+  GIT_COMMITTER_NAME: 'FreeAgent',
+  GIT_COMMITTER_EMAIL: 'freeagent@localhost'
+})
+
+async function gitOk(cwd: string, args: string[], timeoutMs = 20_000): Promise<string> {
+  const res = await runProcess('git', args, { cwd, env: gitEnv(), timeoutMs })
+  if (res.code !== 0) throw new Error((res.stderr || res.stdout || 'git failed').trim())
+  return (res.stdout || res.stderr).trim()
+}
+
+const gitStatus: AgentTool = {
+  spec: {
+    name: 'git_status',
+    description: 'Show git status for the project folder. Read-only.',
+    parameters: { type: 'object', properties: {} }
+  },
+  requiresApproval: false,
+  summarize: () => 'Git status',
+  async run(_a, ctx) {
+    return truncate(await gitOk(ctx.cwd, ['status', '--short', '--branch']), MAX_OUTPUT)
+  }
+}
+
+const gitDiff: AgentTool = {
+  spec: {
+    name: 'git_diff',
+    description: 'Show unstaged and staged diffs in the project folder. Read-only. Optional path must stay inside the folder.',
+    parameters: { type: 'object', properties: { path: { type: 'string' } } }
+  },
+  requiresApproval: false,
+  summarize: (a) => `Git diff ${s(a.path) || ''}`.trim(),
+  async run(a, ctx) {
+    const pathArg = s(a.path)
+    const rel = pathArg ? relative(ctx.cwd, resolveInside(ctx.cwd, pathArg)) : ''
+    const unstaged = await gitOk(ctx.cwd, rel ? ['diff', '--', rel] : ['diff'])
+    const staged = await gitOk(ctx.cwd, rel ? ['diff', '--cached', '--', rel] : ['diff', '--cached'])
+    const text = [unstaged && `Unstaged:\n${unstaged}`, staged && `Staged:\n${staged}`].filter(Boolean).join('\n\n')
+    return truncate(text || 'No diff.', MAX_OUTPUT)
+  }
+}
+
+const gitCommit: AgentTool = {
+  spec: {
+    name: 'git_commit',
+    description: 'Stage the given paths inside the project folder and commit them. Does not push.',
+    parameters: {
+      type: 'object',
+      properties: {
+        message: { type: 'string' },
+        paths: { type: 'array', items: { type: 'string' }, description: 'Files to stage, relative to the project folder' }
+      },
+      required: ['message', 'paths']
+    }
+  },
+  requiresApproval: true,
+  summarize: (a) => `Commit "${s(a.message)}" (${Array.isArray(a.paths) ? a.paths.length : 0} files)`,
+  async run(a, ctx) {
+    const message = s(a.message).trim()
+    if (!message) throw new Error('Commit message is required')
+    const paths = (Array.isArray(a.paths) ? a.paths : []).map((p) => relative(ctx.cwd, resolveInside(ctx.cwd, p))).filter(Boolean)
+    if (!paths.length) throw new Error('Name the files to commit')
+    await gitOk(ctx.cwd, ['rev-parse', '--is-inside-work-tree'])
+    await gitOk(ctx.cwd, ['add', '--', ...paths])
+    return truncate(await gitOk(ctx.cwd, ['-c', 'user.name=FreeAgent', '-c', 'user.email=freeagent@localhost', 'commit', '-m', message]), MAX_OUTPUT)
+  }
+}
+
+function pluginIdsForChat(ctx: ToolContext): string[] {
+  if (!ctx.chatId) throw new Error('No chat is open for this plugin change')
+  const chat = ctx.store.getChat(ctx.chatId)
+  if (!chat) throw new Error('Chat not found')
+  if (chat.pluginIds !== null) return [...chat.pluginIds]
+  const project = chat.projectId ? ctx.store.getProject(chat.projectId) : undefined
+  return [...(project?.enabledPlugins ?? [])]
+}
+
+function rememberPlugin(ctx: ToolContext, ids: string[]): void {
+  if (!ctx.chatId) throw new Error('No chat is open for this plugin change')
+  ctx.store.updateChat(ctx.chatId, { pluginIds: ids })
+}
+
+const readSkillTool: AgentTool = {
+  spec: {
+    name: 'read_skill',
+    description: 'Read one reusable skill by name. Skill names are listed in the instructions.',
+    parameters: { type: 'object', properties: { name: { type: 'string' } }, required: ['name'] }
+  },
+  requiresApproval: false,
+  summarize: (a) => `Read skill ${s(a.name)}`,
+  async run(a, ctx) {
+    return readSkill(ctx.dataDir, ctx.cwd, s(a.name))
+  }
+}
+
+const enablePlugin: AgentTool = {
+  spec: {
+    name: 'enable_plugin',
+    description: 'Turn a plugin on for this chat. Its instructions are included from the next message, and the body is returned now.',
+    parameters: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] }
+  },
+  requiresApproval: false,
+  summarize: (a) => `Enable plugin ${s(a.id)}`,
+  async run(a, ctx) {
+    const doc: PluginDoc | undefined = readPlugin(ctx.dataDir, s(a.id))
+    if (!doc) throw new Error(`Unknown plugin "${s(a.id)}"`)
+    const ids = new Set(pluginIdsForChat(ctx))
+    ids.add(doc.id)
+    rememberPlugin(ctx, [...ids])
+    return `Plugin ${doc.name} is on for this chat.\n\n${doc.body}`
+  }
+}
+
+const disablePlugin: AgentTool = {
+  spec: {
+    name: 'disable_plugin',
+    description: 'Turn a plugin off for this chat.',
+    parameters: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] }
+  },
+  requiresApproval: false,
+  summarize: (a) => `Disable plugin ${s(a.id)}`,
+  async run(a, ctx) {
+    const id = s(a.id).trim().toLowerCase()
+    rememberPlugin(ctx, pluginIdsForChat(ctx).filter((x) => x !== id))
+    return `Plugin ${id} is off for this chat.`
+  }
+}
+
+const memorySave: AgentTool = {
+  spec: {
+    name: 'memory_save',
+    description: 'Remember one short fact the user asked to keep across chats. Do not call this unless the user asked you to remember something.',
+    parameters: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] }
+  },
+  requiresApproval: false,
+  summarize: (a) => `Remember ${s(a.text).slice(0, 80)}`,
+  async run(a, ctx) {
+    const fact = ctx.store.addMemory(s(a.text))
+    return `Remembered: ${fact.text}`
+  }
+}
+
+const memoryForget: AgentTool = {
+  spec: {
+    name: 'memory_forget',
+    description: 'Forget a remembered fact by its id or its exact text.',
+    parameters: { type: 'object', properties: { id: { type: 'string' }, text: { type: 'string' } } }
+  },
+  requiresApproval: false,
+  summarize: (a) => `Forget ${s(a.id) || s(a.text)}`,
+  async run(a, ctx) {
+    const ok = ctx.store.forgetMemory({ id: s(a.id) || undefined, text: s(a.text) || undefined })
+    if (!ok) throw new Error('No matching memory')
+    return 'Forgot that fact.'
+  }
+}
+
+export const BUILTIN_TOOLS: AgentTool[] = [
+  fsList,
+  fsRead,
+  fsWrite,
+  shellExec,
+  runCode,
+  webFetch,
+  webSearch,
+  browserTask,
+  delegateToApp,
+  gitStatus,
+  gitDiff,
+  gitCommit,
+  readSkillTool,
+  enablePlugin,
+  disablePlugin,
+  memorySave,
+  memoryForget
+]

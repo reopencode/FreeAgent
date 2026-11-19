@@ -1,6 +1,7 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import type { AgentEvent, Attachment, ChatMode, IncomingAttachment, StoredMessage } from './api-types'
+import { listPlugins, listSkills, readPlugin, readRules } from './agent/instructions'
 import type { AgentRunner, RunResult } from './agent/runner'
 import { attachmentKind, isTextAttachment, parseIncomingAttachments, readChatMedia, removeChatFile, saveChatMedia, TEXT_INLINE_LIMIT } from './media'
 import type { Store } from './store'
@@ -8,6 +9,7 @@ import type { ChatAttachment, ChatMessage } from './types'
 import { applyTextDelta, truncate } from './util'
 
 const PROJECT_FILES_BUDGET = 40_000
+const PLUGIN_BUDGET = 40_000
 const HISTORY_LIMIT = 40
 
 function mediaFlags(messages: ChatMessage[]): { images: boolean; audio: boolean } {
@@ -37,10 +39,11 @@ export class ChatService {
     return dir
   }
 
-  systemPrompt(projectId: string | null | undefined, mode: ChatMode, cwd: string): string {
+  systemPrompt(projectId: string | null | undefined, mode: ChatMode, cwd: string, chatId?: string): string {
     const settings = this.store.getSettings()
     const parts = [settings.systemPrompt]
     const project = projectId ? this.store.getProject(projectId) : undefined
+    const chat = chatId ? this.store.getChat(chatId) : undefined
     if (project) {
       parts.push(`You are working in the project "${project.name}".${project.description ? ` ${project.description}` : ''}`)
       if (project.instructions.trim()) parts.push(`Project instructions:\n${project.instructions.trim()}`)
@@ -55,10 +58,36 @@ export class ChatService {
       }
       if (blocks.length) parts.push(`Project files:\n${blocks.join('\n')}`)
     }
+    const rules = readRules(cwd)
+    if (rules) parts.push(`Project rules (AGENTS.md):\n${rules}`)
+    const memories = this.store.listMemories()
+    if (memories.length) parts.push(`Facts the user asked to remember:\n${memories.map((m) => `- ${m.text}`).join('\n')}`)
+    const pluginIds = chat && chat.pluginIds !== null ? chat.pluginIds : (project?.enabledPlugins ?? [])
+    let pluginBudget = PLUGIN_BUDGET
+    const pluginBodies: string[] = []
+    for (const id of pluginIds) {
+      if (pluginBudget <= 0) break
+      const plugin = readPlugin(this.dataDir, id)
+      if (!plugin) continue
+      const body = truncate(plugin.body, pluginBudget)
+      pluginBudget -= body.length
+      pluginBodies.push(body)
+    }
+    if (pluginBodies.length) parts.push(`Enabled plugins:\n${pluginBodies.join('\n\n')}`)
     if (mode === 'agent') {
       parts.push(
-        `You are in agent mode with tools. The project folder is ${cwd}. Plan briefly, call tools to do the work, check results, and finish with a short summary of what you did. Use delegate_to_app for larger coding jobs when OpenCode, Kiro or Claude Code are available.`
+        `You are in agent mode with tools. The project folder is ${cwd}. Plan briefly, call tools to do the work, check results, and finish with a short summary of what you did. A long request is split into tasks before you start; when told the current task, do only that task. Use delegate_to_app for larger coding jobs when OpenCode, Kiro or Claude Code are available. Remember a fact with memory_save only when the user asked you to remember it, and remove one with memory_forget.`
       )
+      const skills = listSkills(this.dataDir, cwd)
+      if (skills.length) parts.push(`Skills (call read_skill with the name):\n${skills.map((s) => `- ${s.name}: ${s.summary}`).join('\n')}`)
+      const plugins = listPlugins(this.dataDir)
+      if (plugins.length) {
+        parts.push(
+          `Plugins (call enable_plugin or disable_plugin with the id):\n${plugins
+            .map((p) => `- ${p.id}: ${p.name} — ${p.description}${pluginIds.includes(p.id) ? ' (on)' : ''}`)
+            .join('\n')}`
+        )
+      }
     }
     parts.push(`Today is ${new Date().toDateString()}.`)
     return parts.join('\n\n')
@@ -125,7 +154,7 @@ export class ChatService {
     const settings = this.store.getSettings()
     const history = this.providerHistory(chatId)
     const flags = mediaFlags(history)
-    const messages: ChatMessage[] = [{ role: 'system', content: this.systemPrompt(chat.projectId, chat.mode, cwd) }, ...history]
+    const messages: ChatMessage[] = [{ role: 'system', content: this.systemPrompt(chat.projectId, chat.mode, cwd, chatId) }, ...history]
     let result: RunResult | undefined
     let partial = ''
     try {

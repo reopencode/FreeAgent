@@ -32,7 +32,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
 import { api } from '@/lib/api'
 import { useNav } from '@/lib/nav'
-import { keys, useInfo, useMcpServers, useProviders, useSettings, useTools } from '@/lib/queries'
+import { keys, useInfo, useMcpServers, useMemories, usePlugins, useProviders, useSettings, useSkills, useTools } from '@/lib/queries'
 import { cn } from '@/lib/utils'
 
 type Tab = 'providers' | 'integrations' | 'mcp' | 'general'
@@ -649,6 +649,113 @@ function McpTab(): React.JSX.Element {
   )
 }
 
+function PackSection({ kind }: { kind: 'skills' | 'plugins' }): React.JSX.Element {
+  const qc = useQueryClient()
+  const skills = useSkills()
+  const plugins = usePlugins()
+  const [name, setName] = useState('')
+  const [body, setBody] = useState('')
+  const isSkill = kind === 'skills'
+  const key = isSkill ? keys.skills : keys.plugins
+  const items = isSkill
+    ? (skills.data ?? []).map((s) => ({ id: s.id, name: s.name, detail: s.summary }))
+    : (plugins.data ?? []).map((p) => ({ id: p.id, name: p.name, detail: p.description }))
+  const add = useMutation({
+    mutationFn: () => api.post(isSkill ? '/api/skills' : '/api/plugins', { name, body }),
+    onSuccess: () => {
+      setName('')
+      setBody('')
+      void qc.invalidateQueries({ queryKey: key })
+    },
+    onError: (e) => toast.error(e.message)
+  })
+  const remove = useMutation({
+    mutationFn: (id: string) => api.del(`${isSkill ? '/api/skills' : '/api/plugins'}/${encodeURIComponent(id)}`),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: key }),
+    onError: (e) => toast.error(e.message)
+  })
+  return (
+    <section className="rounded-xl border bg-card p-5">
+      <h2 className="font-medium">{isSkill ? 'Skills' : 'Plugins'}</h2>
+      <p className="mb-3 text-xs text-muted-foreground">
+        {isSkill
+          ? 'Reusable notes the agent can open with read_skill. A project can also keep skills in .freeagent/skills in its working folder.'
+          : 'Instruction packs. Turn one on for a project, or let the agent enable it for a single chat.'}
+      </p>
+      {items.length === 0 ? (
+        <p className="mb-3 text-xs text-muted-foreground">None yet.</p>
+      ) : (
+        <ul className="mb-3 divide-y rounded-lg border">
+          {items.map((item) => (
+            <li key={item.id} className="flex items-center gap-2 px-3 py-2">
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-medium">{item.name}</p>
+                {item.detail && <p className="truncate text-xs text-muted-foreground">{item.detail}</p>}
+              </div>
+              <Button variant="ghost" size="icon" className="size-7" onClick={() => remove.mutate(item.id)} aria-label={`Delete ${item.name}`}>
+                <Trash2 className="size-3.5" />
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="space-y-2">
+        <Input value={name} onChange={(e) => setName(e.target.value)} placeholder="Name" />
+        <Textarea rows={4} value={body} onChange={(e) => setBody(e.target.value)} placeholder={'# Name\nOne line about when to use it.\n\nThe rest of the instructions.'} />
+        <Button size="sm" disabled={!name.trim() || !body.trim() || add.isPending} onClick={() => add.mutate()}>
+          {add.isPending && <Loader2 className="animate-spin" />}
+          Add {isSkill ? 'skill' : 'plugin'}
+        </Button>
+      </div>
+    </section>
+  )
+}
+
+function MemorySection(): React.JSX.Element {
+  const qc = useQueryClient()
+  const memories = useMemories()
+  const [text, setText] = useState('')
+  const add = useMutation({
+    mutationFn: () => api.post('/api/memories', { text }),
+    onSuccess: () => {
+      setText('')
+      void qc.invalidateQueries({ queryKey: keys.memories })
+    },
+    onError: (e) => toast.error(e.message)
+  })
+  const remove = useMutation({
+    mutationFn: (id: string) => api.del(`/api/memories/${encodeURIComponent(id)}`),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: keys.memories }),
+    onError: (e) => toast.error(e.message)
+  })
+  return (
+    <section className="rounded-xl border bg-card p-5">
+      <h2 className="font-medium">Memory</h2>
+      <p className="mb-3 text-xs text-muted-foreground">Facts kept across chats. The agent saves one only when you ask it to remember.</p>
+      {(memories.data ?? []).length === 0 ? (
+        <p className="mb-3 text-xs text-muted-foreground">Nothing remembered yet.</p>
+      ) : (
+        <ul className="mb-3 divide-y rounded-lg border">
+          {(memories.data ?? []).map((fact) => (
+            <li key={fact.id} className="flex items-center gap-2 px-3 py-2">
+              <p className="min-w-0 flex-1 text-sm">{fact.text}</p>
+              <Button variant="ghost" size="icon" className="size-7" onClick={() => remove.mutate(fact.id)} aria-label="Forget fact">
+                <Trash2 className="size-3.5" />
+              </Button>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="flex gap-2">
+        <Input value={text} onChange={(e) => setText(e.target.value)} placeholder="Remember that I prefer short answers" maxLength={240} />
+        <Button size="sm" disabled={!text.trim() || add.isPending} onClick={() => add.mutate()}>
+          Save
+        </Button>
+      </div>
+    </section>
+  )
+}
+
 function GeneralTab(): React.JSX.Element {
   const qc = useQueryClient()
   const settings = useSettings()
@@ -685,6 +792,10 @@ function GeneralTab(): React.JSX.Element {
           Save
         </Button>
       </section>
+
+      <PackSection kind="skills" />
+      <PackSection kind="plugins" />
+      <MemorySection />
 
       <section className="divide-y rounded-xl border bg-card px-5">
         <Row title="Theme" hint="Follows your system by default.">

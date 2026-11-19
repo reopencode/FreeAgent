@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import type { Attachment, CouncilAnswer, RouteAttempt, ToolStep } from '@core/api-types'
+import type { AgentTask, Attachment, CouncilAnswer, RouteAttempt, ToolStep } from '@core/api-types'
 import { useMutation } from '@tanstack/react-query'
 import { AlertCircle, Check, ChevronRight, CircleSlash, Copy, Loader2, Pencil, RefreshCw, ShieldQuestion, Users, Wrench, X } from 'lucide-react'
 import { toast } from 'sonner'
@@ -22,6 +22,7 @@ export interface AssistantView {
   model?: string
   attempts?: RouteAttempt[]
   steps?: ToolStep[]
+  tasks?: AgentTask[]
   council?: CouncilAnswer[]
   error?: string
   status?: string
@@ -138,6 +139,27 @@ function ToolStepCard({ step, approvalId }: { step: ToolStep; approvalId?: strin
   )
 }
 
+function TaskList({ tasks }: { tasks: AgentTask[] }): React.JSX.Element {
+  return (
+    <ol className="rounded-lg border bg-card/60 px-3 py-2 text-sm">
+      {tasks.map((task, i) => (
+        <li key={task.id} className="flex items-start gap-2 py-1">
+          {task.status === 'done' ? (
+            <Check className="mt-0.5 size-3.5 text-emerald-600" />
+          ) : task.status === 'running' ? (
+            <Loader2 className="mt-0.5 size-3.5 animate-spin text-muted-foreground" />
+          ) : (
+            <span className="mt-0.5 size-3.5 rounded-full border border-muted-foreground/40" />
+          )}
+          <span className={cn('min-w-0 flex-1', task.status === 'done' && 'text-muted-foreground line-through')}>
+            {i + 1}. {task.title}
+          </span>
+        </li>
+      ))}
+    </ol>
+  )
+}
+
 function prettyJson(s: string): string {
   try {
     return JSON.stringify(JSON.parse(s), null, 2)
@@ -183,6 +205,7 @@ export function AssistantMessage({ view, onRegenerate }: { view: AssistantView; 
   return (
     <div className="group flex flex-col gap-2">
       {view.council && view.council.length > 0 && <CouncilPanel answers={view.council} />}
+      {view.tasks && view.tasks.length > 0 && <TaskList tasks={view.tasks} />}
       {view.steps?.map((s) => <ToolStepCard key={s.id} step={s} approvalId={view.approvals?.[s.id]} />)}
       {view.media?.map((m, i) => (
         <DataMedia key={`live-${i}`} mime={m.mime} base64={m.base64} name={m.name} />

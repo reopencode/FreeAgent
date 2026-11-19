@@ -14,7 +14,13 @@ import {
   siteOverridePath,
   validateSiteConfig,
   chatToMarkdown,
+  deletePlugin,
+  deleteSkill,
+  listAppSkills,
+  listPlugins,
   markdownFilename,
+  savePlugin,
+  saveSkill,
   readChatMedia,
   removeChatMedia,
   type AgentEvent,
@@ -122,8 +128,9 @@ export function createApp(core: Core, cfg: ServerConfig, scheduler: Scheduler): 
   })
 
   app.patch('/api/chats/:id', async (c) => {
-    const b = await body<{ title?: string; mode?: ChatMode; target?: string; projectId?: string | null }>(c)
+    const b = await body<{ title?: string; mode?: ChatMode; target?: string; projectId?: string | null; pluginIds?: string[] | null }>(c)
     if (b.mode && !MODES.includes(b.mode)) return bad(c, 'Invalid mode')
+    if (b.pluginIds !== undefined && b.pluginIds !== null && !b.pluginIds.every((id) => typeof id === 'string')) return bad(c, 'pluginIds must be a list of ids')
     const chat = store.updateChat(c.req.param('id'), b)
     return chat ? c.json(chat) : bad(c, 'Chat not found', 404)
   })
@@ -241,8 +248,9 @@ export function createApp(core: Core, cfg: ServerConfig, scheduler: Scheduler): 
   })
 
   app.patch('/api/projects/:id', async (c) => {
-    const b = await body<{ name?: string; description?: string; instructions?: string; workspaceDir?: string | null }>(c)
+    const b = await body<{ name?: string; description?: string; instructions?: string; workspaceDir?: string | null; enabledPlugins?: string[] }>(c)
     if (b.workspaceDir && !existsSync(b.workspaceDir)) return bad(c, 'That folder does not exist')
+    if (b.enabledPlugins && !b.enabledPlugins.every((id) => typeof id === 'string')) return bad(c, 'enabledPlugins must be a list of ids')
     const p = store.updateProject(c.req.param('id'), b)
     return p ? c.json(p) : bad(c, 'Project not found', 404)
   })
@@ -264,6 +272,56 @@ export function createApp(core: Core, cfg: ServerConfig, scheduler: Scheduler): 
   app.delete('/api/project-files/:id', (c) => {
     store.deleteProjectFile(c.req.param('id'))
     return c.json({ ok: true })
+  })
+
+  app.get('/api/skills', (c) => c.json(listAppSkills(core.dataDir)))
+
+  app.post('/api/skills', async (c) => {
+    const b = await body<{ name?: string; body?: string }>(c)
+    if (!b.name?.trim() || !b.body?.trim()) return bad(c, 'Name and body are required')
+    return c.json(saveSkill(core.dataDir, b.name, b.body), 201)
+  })
+
+  app.delete('/api/skills/:id', (c) => {
+    try {
+      deleteSkill(core.dataDir, c.req.param('id'))
+    } catch {
+      return bad(c, 'Skill not found', 404)
+    }
+    return c.json({ ok: true })
+  })
+
+  app.get('/api/plugins', (c) => c.json(listPlugins(core.dataDir)))
+
+  app.post('/api/plugins', async (c) => {
+    const b = await body<{ name?: string; body?: string }>(c)
+    if (!b.name?.trim() || !b.body?.trim()) return bad(c, 'Name and body are required')
+    return c.json(savePlugin(core.dataDir, b.name, b.body), 201)
+  })
+
+  app.delete('/api/plugins/:id', (c) => {
+    try {
+      deletePlugin(core.dataDir, c.req.param('id'))
+    } catch {
+      return bad(c, 'Plugin not found', 404)
+    }
+    return c.json({ ok: true })
+  })
+
+  app.get('/api/memories', (c) => c.json(store.listMemories()))
+
+  app.post('/api/memories', async (c) => {
+    const b = await body<{ text?: string }>(c)
+    if (!b.text?.trim()) return bad(c, 'Text is required')
+    try {
+      return c.json(store.addMemory(b.text), 201)
+    } catch (err) {
+      return bad(c, err instanceof Error ? err.message : String(err))
+    }
+  })
+
+  app.delete('/api/memories/:id', (c) => {
+    return store.forgetMemory({ id: c.req.param('id') }) ? c.json({ ok: true }) : bad(c, 'Memory not found', 404)
   })
 
   // Automations

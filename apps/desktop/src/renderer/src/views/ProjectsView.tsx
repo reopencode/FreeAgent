@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeft, FileText, Folder, FolderKanban, FolderOpen, Loader2, MessageSquarePlus, Plus, Trash2, Upload } from 'lucide-react'
 import { toast } from 'sonner'
 import { Button } from '@/components/ui/button'
+import { Switch } from '@/components/ui/switch'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -12,7 +13,7 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { api } from '@/lib/api'
 import { timeAgo } from '@/lib/format'
 import { useNav } from '@/lib/nav'
-import { keys, useProject, useProjects } from '@/lib/queries'
+import { keys, usePlugins, useProject, useProjects } from '@/lib/queries'
 
 function NewProjectDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (o: boolean) => void }): React.JSX.Element {
   const qc = useQueryClient()
@@ -69,6 +70,7 @@ function ProjectDetail({ projectId }: { projectId: string }): React.JSX.Element 
   const { go } = useNav()
   const qc = useQueryClient()
   const project = useProject(projectId)
+  const plugins = usePlugins()
   const [instructions, setInstructions] = useState('')
   const [confirmDelete, setConfirmDelete] = useState(false)
   const fileInput = useRef<HTMLInputElement>(null)
@@ -182,6 +184,35 @@ function ProjectDetail({ projectId }: { projectId: string }): React.JSX.Element 
             <Button size="sm" className="mt-2" disabled={instructions === p.instructions || update.isPending} onClick={() => update.mutate({ instructions })}>
               Save instructions
             </Button>
+          </div>
+
+          <div className="rounded-xl border bg-card p-4">
+            <h3 className="mb-1 text-sm font-medium">Plugins</h3>
+            <p className="mb-2 text-xs text-muted-foreground">
+              Instruction packs for chats in this project. A chat can override the set. AGENTS.md in the working folder is loaded on its own, and skills in .freeagent/skills are available to the agent.
+            </p>
+            {(plugins.data ?? []).length === 0 ? (
+              <p className="text-xs text-muted-foreground">No plugins yet. Add one in Customize.</p>
+            ) : (
+              <div className="space-y-3">
+                {(plugins.data ?? []).map((plugin) => (
+                  <div key={plugin.id} className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="truncate text-sm font-medium">{plugin.name}</p>
+                      {plugin.description && <p className="truncate text-xs text-muted-foreground">{plugin.description}</p>}
+                    </div>
+                    <Switch
+                      checked={p.enabledPlugins.includes(plugin.id)}
+                      onCheckedChange={(on) => {
+                        const enabledPlugins = on ? [...p.enabledPlugins, plugin.id] : p.enabledPlugins.filter((id) => id !== plugin.id)
+                        update.mutate({ enabledPlugins })
+                      }}
+                      aria-label={`Turn ${plugin.name} ${p.enabledPlugins.includes(plugin.id) ? 'off' : 'on'}`}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="rounded-xl border bg-card p-4">

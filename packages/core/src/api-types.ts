@@ -8,6 +8,8 @@ export interface Project {
   description: string
   instructions: string
   workspaceDir: string | null
+  /** Plugin ids turned on for every chat in this project, unless a chat sets its own list. */
+  enabledPlugins: string[]
   createdAt: number
   updatedAt: number
 }
@@ -27,6 +29,8 @@ export interface Chat {
   title: string
   mode: ChatMode
   target: string
+  /** `null` uses the project's enabled plugins. An array replaces that set for this chat. */
+  pluginIds: string[] | null
   createdAt: number
   updatedAt: number
 }
@@ -35,6 +39,12 @@ export interface RouteAttempt {
   providerId: string
   model?: string
   error?: string
+}
+
+export interface AgentTask {
+  id: string
+  title: string
+  status: 'pending' | 'running' | 'done'
 }
 
 export interface ToolStep {
@@ -58,6 +68,7 @@ export interface MessageMeta {
   model?: string
   attempts?: RouteAttempt[]
   steps?: ToolStep[]
+  tasks?: AgentTask[]
   council?: CouncilAnswer[]
   error?: string
   durationMs?: number
@@ -173,6 +184,25 @@ export interface McpServerConfig {
   hasEnv: boolean
 }
 
+export interface SkillInfo {
+  id: string
+  name: string
+  summary: string
+  source: 'app' | 'project'
+}
+
+export interface PluginInfo {
+  id: string
+  name: string
+  description: string
+}
+
+export interface MemoryFact {
+  id: string
+  text: string
+  createdAt: number
+}
+
 export interface AppSettings {
   systemPrompt: string
   theme: 'system' | 'light' | 'dark'
@@ -208,6 +238,7 @@ export type AgentEvent =
   | { type: 'approval_request'; id: string; toolCallId: string; name: string; args: string; summary: string }
   | { type: 'approval_resolved'; id: string; approved: boolean }
   | { type: 'tool_result'; id: string; ok: boolean; output: string }
+  | { type: 'task_list'; tasks: AgentTask[] }
   | { type: 'council_answer'; answer: CouncilAnswer }
   | { type: 'error'; message: string }
   | { type: 'done'; message: StoredMessage | null }

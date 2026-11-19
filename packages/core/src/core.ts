@@ -33,7 +33,7 @@ export function createCore(opts: { dataDir?: string; dbFile?: string; secrets?: 
   const router = new Router(registry, store)
   const approvals = new Approvals()
   const mcp = new McpManager(store)
-  const runner = new AgentRunner({ router, registry, store, approvals, mcp })
+  const runner = new AgentRunner({ router, registry, store, approvals, mcp, dataDir })
   const chats = new ChatService(store, runner, dataDir)
   return {
     dataDir,

@@ -1,17 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { ChatMode, StoredMessage } from '@core/api-types'
-import { useQueryClient } from '@tanstack/react-query'
-import { Code2, Download, FolderKanban, Globe, Loader2, Newspaper, Sparkles, TriangleAlert, X } from 'lucide-react'
+import { useMutation, useQueryClient } from '@tanstack/react-query'
+import { Code2, Download, FolderKanban, Globe, Loader2, Newspaper, Puzzle, Sparkles, TriangleAlert, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { DropdownMenu, DropdownMenuCheckboxItem, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Composer } from '@/components/chat/Composer'
 import { bytesToBase64, providerProblem, type DraftAttachment } from '@/components/chat/draft'
 import { AssistantMessage, UserMessage, type AssistantView } from '@/components/chat/Messages'
 import { api, connection } from '@/lib/api'
 import { useNav } from '@/lib/nav'
-import { keys, useChat, useProject, useProviders } from '@/lib/queries'
+import { keys, useChat, usePlugins, useProject, useProviders } from '@/lib/queries'
 import { startEdit, startRegenerate, startReply, stopReply, useLiveReply } from '@/lib/streams'
 
 const SUGGESTIONS = [
@@ -43,12 +44,54 @@ function toView(m: StoredMessage): AssistantView {
     model: m.meta.model,
     attempts: m.meta.attempts,
     steps: m.meta.steps,
+    tasks: m.meta.tasks,
     council: m.meta.council,
     error: m.meta.error,
     durationMs: m.meta.durationMs,
     chatId: m.chatId,
     attachments: m.attachments
   }
+}
+
+function PluginMenu({ chatId, pluginIds, projectPlugins }: { chatId: string; pluginIds: string[] | null; projectPlugins: string[] }): React.JSX.Element | null {
+  const plugins = usePlugins()
+  const qc = useQueryClient()
+  const save = useMutation({
+    mutationFn: (next: string[] | null) => api.patch(`/api/chats/${chatId}`, { pluginIds: next }),
+    onSuccess: () => void qc.invalidateQueries({ queryKey: keys.chat(chatId) }),
+    onError: (e: Error) => toast.error(e.message)
+  })
+  const list = plugins.data ?? []
+  if (!list.length) return null
+  const active = pluginIds ?? projectPlugins
+  const toggle = (id: string): void => {
+    const next = active.includes(id) ? active.filter((x) => x !== id) : [...active, id]
+    save.mutate(next)
+  }
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="ghost" size="sm" className="text-muted-foreground">
+          <Puzzle />
+          Plugins
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-64">
+        <DropdownMenuLabel>Plugins for this chat</DropdownMenuLabel>
+        {list.map((plugin) => (
+          <DropdownMenuCheckboxItem key={plugin.id} checked={active.includes(plugin.id)} onCheckedChange={() => toggle(plugin.id)}>
+            {plugin.name}
+          </DropdownMenuCheckboxItem>
+        ))}
+        {pluginIds !== null && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => save.mutate(null)}>Use project defaults</DropdownMenuItem>
+          </>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
 }
 
 export function ChatView({ chatId, projectId }: { chatId?: string; projectId?: string }): React.JSX.Element {
@@ -87,7 +130,7 @@ export function ChatView({ chatId, projectId }: { chatId?: string; projectId?: s
   useEffect(() => {
     const el = scroller.current
     if (el && stick.current) el.scrollTop = el.scrollHeight
-  }, [messages.length, live?.content, live?.steps.length, live?.status])
+  }, [messages.length, live?.content, live?.steps.length, live?.tasks.length, live?.status])
 
   const readyReal = (providers.data ?? []).filter((p) => p.enabled && p.status.state === 'ready' && p.id !== 'mock')
 
@@ -257,6 +300,7 @@ export function ChatView({ chatId, projectId }: { chatId?: string; projectId?: s
     <div className="flex h-full flex-col">
       <header className="flex h-12 shrink-0 items-center gap-2 border-b px-4">
         <h2 className="min-w-0 flex-1 truncate text-sm font-medium">{chat.data?.chat.title ?? ' '}</h2>
+        {chatId && <PluginMenu chatId={chatId} pluginIds={chat.data?.chat.pluginIds ?? null} projectPlugins={project.data?.project.enabledPlugins ?? []} />}
         <Button variant="ghost" size="icon" className="size-8 text-muted-foreground" onClick={() => void exportChat()} aria-label="Export chat">
           <Download />
         </Button>
@@ -314,6 +358,7 @@ export function ChatView({ chatId, projectId }: { chatId?: string; projectId?: s
                   model: live.model,
                   attempts: live.attempts,
                   steps: live.steps,
+                  tasks: live.tasks,
                   council: live.council,
                   error: live.error,
                   status: live.status,

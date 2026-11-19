@@ -5,11 +5,14 @@ import type {
   AutomationRun,
   Chat,
   McpServerConfig,
+  MemoryFact,
   ModelOption,
+  PluginInfo,
   Project,
   ProjectFile,
   ProviderSummary,
   ServerInfo,
+  SkillInfo,
   StoredMessage
 } from '@core/api-types'
 import { api } from './api'
@@ -44,7 +47,10 @@ export const keys = {
   mcp: ['mcp'] as const,
   approvals: ['approvals'] as const,
   claudeDesktop: ['claude-desktop'] as const,
-  tools: ['tools'] as const
+  tools: ['tools'] as const,
+  skills: ['skills'] as const,
+  plugins: ['plugins'] as const,
+  memories: ['memories'] as const
 }
 
 export const useChats = (query = '') =>
@@ -86,3 +92,6 @@ export const useClaudeDesktop = () =>
   })
 export const useTools = () =>
   useQuery({ queryKey: keys.tools, queryFn: () => api.get<{ name: string; description: string; requiresApproval: boolean }[]>('/api/tools'), staleTime: 30_000 })
+export const useSkills = () => useQuery({ queryKey: keys.skills, queryFn: () => api.get<SkillInfo[]>('/api/skills') })
+export const usePlugins = () => useQuery({ queryKey: keys.plugins, queryFn: () => api.get<PluginInfo[]>('/api/plugins') })
+export const useMemories = () => useQuery({ queryKey: keys.memories, queryFn: () => api.get<MemoryFact[]>('/api/memories') })
