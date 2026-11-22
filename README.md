@@ -4,7 +4,7 @@ A desktop AI agent that does its work with the free AI you already have:
 
 - **API keys:** OpenRouter and Google Gemini (AI Studio), plus any OpenAI-compatible endpoint you add as a custom API.
 - **Free web plans:** Grok, ChatGPT, Gemini, Claude, DeepSeek, Pi, Kimi and Z.ai, driven through a real browser that you sign in to once.
-- **Local coding agents:** OpenCode and Kiro CLI.
+- **Local coding agents:** OpenCode, Kiro CLI and Kilo CLI.
 
 The left sidebar has **New chat**, **Automations**, **Projects** and **Customize**, plus your recent chats.
 
@@ -45,7 +45,7 @@ A video of the same interaction: [chat-demo.mp4](docs/media/chat_demo.mp4).
 | Area | What you get |
 | --- | --- |
 | Chat | Streaming replies with Markdown and code. Pick **Auto**, Auto · Code / Fast / Long context / Vision / Reasoning, a specific provider, or a specific model. |
-| Modes | **Chat** answers only. **Agent** can call tools: read, write and list files, run shell commands and code, search and fetch the web, drive a browser, hand a task to OpenCode or Kiro, and use MCP tools. **Council** asks several providers and merges their answers. |
+| Modes | **Chat** answers only. **Agent** can call tools: read, write and list files, run shell commands and code, search and fetch the web, drive a browser, hand a task to OpenCode, Kiro or Kilo, and use MCP tools. **Council** asks several providers and merges their answers. |
 | Routing | Providers are tried in your order. On a rate limit, quota error, timeout or login problem, FreeAgent moves to the next provider and puts the failing one on a short cooldown. Daily request limits are tracked per provider. |
 | Approvals | In Agent mode, writing files and running commands wait for **Allow** or **Deny**, unless you turn on auto-approve. |
 | Projects | Shared instructions, text files used as context, and a working folder for the agent and coding apps. |
@@ -105,6 +105,7 @@ If the desktop app finds a headless server already running on the same data fold
 | Grok, ChatGPT, Gemini (web), Claude (web), DeepSeek, Pi, Kimi, Z.ai | Run `pnpm browsers` once. Then click **Sign in**, log in in the window that opens, close it, and click **Check login**. ChatGPT can also work without an account once you have connected it; the other sites need a sign-in. Each site keeps its own browser profile in `<dataDir>/browser-profiles/`. These are **experimental**: sites change their markup and add bot checks. If replies stop arriving, edit the selectors under **Selectors**, or turn on **Show browser windows** to solve a captcha. In Agent mode, tool calls are emulated through text: the site gets a compact tool list, replies with `tool_call` blocks, and gets one correction prompt if a block is malformed. This works with **Web chat: send message only** turned on. API providers are still more reliable for long tool runs. To use a specific model on a site, type its name in **Model name** (for example `Argon` on Gemini, `Expert` on Grok, `Sonnet` or `Opus` on Claude). Before each chat FreeAgent opens the site's model menu and clicks the matching entry; if nothing matches, the error lists what the menu offers. Leave it empty to keep the site's current model. Pi has no model menu. |
 | OpenCode | Install it ([opencode.ai](https://opencode.ai/docs)) and run `opencode auth login` once. FreeAgent starts `opencode serve` and sends tasks to it in the project folder. |
 | Kiro | Install `kiro-cli`, then run `kiro-cli login` or paste a `KIRO_API_KEY`. Tasks run with `kiro-cli chat --no-interactive`. |
+| Kilo | Install the [Kilo CLI](https://kilo.ai/docs/code-with-ai/platforms/cli), then run `kilo auth login` once. Tasks run with `kilo run --auto` in the project folder. |
 
 App providers aren't used for ordinary Auto chat. Use them by picking them directly, or let the agent call `delegate_to_app`.
 
@@ -142,7 +143,7 @@ Claude model names are mapped onto the router. Sonnet and Opus go to Auto · Cod
 - `ask_provider` (ask any free model or website)
 - `run_automation`
 - `search_projects`
-- `delegate_to_app` (hand a coding task to OpenCode or Kiro)
+- `delegate_to_app` (hand a coding task to OpenCode, Kiro or Kilo)
 
 ## Telegram bot
 
@@ -229,7 +230,7 @@ Checked against the current app. Shipped behavior stays in the sections above.
 - [x] **Selector overrides.** Per-site CSS selectors can be edited and reset. Overrides are stored in `~/.freeagent/web-sites/<id>.json`.
 - [x] **Website reply as Markdown.** Tables and code are read from the page. **Web chat: send message only** sends only the latest user message in Chat mode. Agent mode always sends the instructions and tools.
 - [x] **Visible browser.** **Show browser windows** opens the site window, which is how a human check is solved today. Cloudflare and DeepSeek’s usage dialog are detected and reported.
-- [x] **Local coding agents.** OpenCode, Kiro CLI and the Claude Code CLI. They are picked directly, or the agent calls `delegate_to_app`.
+- [x] **Local coding agents.** OpenCode, Kiro CLI, Kilo CLI and the Claude Code CLI. They are picked directly, or the agent calls `delegate_to_app`.
 
 **Agent tools**
 
@@ -269,7 +270,7 @@ Checked against the current app. Shipped behavior stays in the sections above.
 
 ### Limits, integrations, tests
 
-- [ ] **Harder usage limits.** Stop a provider for the rest of the day once it hits its limit, including when it is picked by name. Add an optional token cap. OpenCode, Kiro and Claude Code have no limit today, and a direct pick still runs a provider that is over its request count.
+- [ ] **Harder usage limits.** Stop a provider for the rest of the day once it hits its limit, including when it is picked by name. Add an optional token cap. OpenCode, Kiro, Kilo and Claude Code have no limit today, and a direct pick still runs a provider that is over its request count.
 - [ ] **Telegram beyond private text.** Photos, voice notes and documents, plus Agent mode. The bot today accepts private text in chat mode.
 - [ ] **Agent mode on the MCP server.** `ask_provider` accepts `chat` and `council`. Add `agent` so an MCP client can run tools, not only ask a question.
 - [ ] **Notify when a long run finishes.** A desktop notification when an automation or a long agent reply ends while the window is in the background.

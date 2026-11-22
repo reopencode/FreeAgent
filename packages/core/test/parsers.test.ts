@@ -4,6 +4,7 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import { parseDuckDuckGo, resolveInside } from '../src/agent/tools'
 import { parseClaudeStreamLine } from '../src/providers/apps/claude'
+import { kiloModelArg, parseKiloRunLine } from '../src/providers/apps/kilo'
 import { cleanKiroLine } from '../src/providers/apps/kiro'
 import { flattenConversation, followUpPrompt, latestUserText, parseEmulatedToolCalls } from '../src/providers/emulated-tools'
 import { cleanSchema, toGeminiRequest } from '../src/providers/gemini'
@@ -144,6 +145,24 @@ describe('app provider output parsing', () => {
     expect(cleanKiroLine('> Hello')).toBe('Hello')
     expect(cleanKiroLine('⠋')).toBeNull()
     expect(cleanKiroLine('plain text   ')).toBe('plain text')
+  })
+
+  it('parses Kilo run json lines', () => {
+    expect(parseKiloRunLine(JSON.stringify({ type: 'text', part: { type: 'text', text: 'Done.' } }))).toEqual([{ type: 'text', text: 'Done.' }])
+    expect(parseKiloRunLine(JSON.stringify({ type: 'tool_use', part: { type: 'tool', tool: 'bash' } }))).toEqual([{ type: 'status', message: 'Kilo: bash' }])
+    expect(parseKiloRunLine(JSON.stringify({ type: 'error', error: { name: 'AuthError', data: { message: 'login required' } } }))).toEqual([
+      { type: 'status', message: 'Kilo: login required' }
+    ])
+    expect(parseKiloRunLine('not json')).toEqual([])
+    expect(parseKiloRunLine(JSON.stringify({ type: 'step_start' }))).toEqual([])
+  })
+
+  it('passes only provider/model ids to kilo', () => {
+    expect(kiloModelArg('10')).toBeUndefined()
+    expect(kiloModelArg('default')).toBeUndefined()
+    expect(kiloModelArg('kilo/')).toBeUndefined()
+    expect(kiloModelArg('kilo/anthropic/claude-sonnet-4.5')).toBe('kilo/anthropic/claude-sonnet-4.5')
+    expect(kiloModelArg(' kilo/nvidia/nemotron-3.5-super-vl:free ')).toBe('kilo/nvidia/nemotron-3.5-super-vl:free')
   })
 })
 

@@ -76,7 +76,7 @@ export class ChatService {
     if (pluginBodies.length) parts.push(`Enabled plugins:\n${pluginBodies.join('\n\n')}`)
     if (mode === 'agent') {
       parts.push(
-        `You are in agent mode with tools. The project folder is ${cwd}. Plan briefly, call tools to do the work, check results, and finish with a short summary of what you did. A long request is split into tasks before you start; when told the current task, do only that task. Use delegate_to_app for larger coding jobs when OpenCode, Kiro or Claude Code are available. Remember a fact with memory_save only when the user asked you to remember it, and remove one with memory_forget.`
+        `You are in agent mode with tools. The project folder is ${cwd}. Plan briefly, call tools to do the work, check results, and finish with a short summary of what you did. A long request is split into tasks before you start; when told the current task, do only that task. Use delegate_to_app for larger coding jobs when OpenCode, Kiro, Kilo or Claude Code are available. Remember a fact with memory_save only when the user asked you to remember it, and remove one with memory_forget.`
       )
       const skills = listSkills(this.dataDir, cwd)
       if (skills.length) parts.push(`Skills (call read_skill with the name):\n${skills.map((s) => `- ${s.name}: ${s.summary}`).join('\n')}`)

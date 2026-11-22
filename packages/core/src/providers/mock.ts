@@ -44,7 +44,7 @@ export class MockProvider implements Provider {
       '',
       `> ${text.split('\n').join('\n> ') || '(empty message)'}`,
       '',
-      'To get real answers, open **Customize → Providers** and add a free OpenRouter or Gemini key, connect a web plan, or install OpenCode or Kiro.'
+      'To get real answers, open **Customize → Providers** and add a free OpenRouter or Gemini key, connect a web plan, or install OpenCode, Kiro or Kilo.'
     ].join('\n')
     yield* this.stream(reply, opts.signal)
     yield { type: 'usage', inputTokens: Math.ceil(text.length / 4), outputTokens: Math.ceil(reply.length / 4) }

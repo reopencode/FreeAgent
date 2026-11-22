@@ -88,9 +88,9 @@ export function createMcpServer(core: Core, scheduler: Scheduler): McpServer {
   server.registerTool(
     'delegate_to_app',
     {
-      description: 'Hand a coding task to a local coding agent (OpenCode, Kiro or Claude Code) in a project folder. It can edit files.',
+      description: 'Hand a coding task to a local coding agent (OpenCode, Kiro, Kilo or Claude Code) in a project folder. It can edit files.',
       inputSchema: {
-        app: z.enum(['opencode', 'kiro', 'claude']),
+        app: z.enum(['opencode', 'kiro', 'kilo', 'claude']),
         task: z.string(),
         project: z.string().optional().describe('Project id or name; its folder is used as the working directory')
       }

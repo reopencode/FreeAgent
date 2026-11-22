@@ -217,7 +217,7 @@ function ProjectDetail({ projectId }: { projectId: string }): React.JSX.Element 
 
           <div className="rounded-xl border bg-card p-4">
             <h3 className="mb-1 text-sm font-medium">Working folder</h3>
-            <p className="mb-2 text-xs text-muted-foreground">Agent tools, OpenCode, Kiro and Claude Code work inside this folder.</p>
+            <p className="mb-2 text-xs text-muted-foreground">Agent tools, OpenCode, Kiro, Kilo and Claude Code work inside this folder.</p>
             <div className="mb-2 flex items-center gap-2 rounded-md bg-muted px-2 py-1.5 font-mono text-xs break-all">
               <Folder className="size-3.5 shrink-0" />
               {p.workspaceDir ?? `${workspace} (default)`}

@@ -5,7 +5,7 @@ import { cn } from '@/lib/utils'
 
 const MODES: { id: ChatMode; label: string; icon: typeof Bot; hint: string }[] = [
   { id: 'chat', label: 'Chat', icon: MessageCircle, hint: 'Plain conversation with one provider' },
-  { id: 'agent', label: 'Agent', icon: Bot, hint: 'Uses tools: files, shell, web, browser, OpenCode/Kiro/Claude Code and MCP servers' },
+  { id: 'agent', label: 'Agent', icon: Bot, hint: 'Uses tools: files, shell, web, browser, OpenCode/Kiro/Kilo/Claude Code and MCP servers' },
   { id: 'council', label: 'Council', icon: Users, hint: 'Asks several providers at once and merges the best answer' }
 ]
 

@@ -287,11 +287,11 @@ const delegateToApp: AgentTool = {
   spec: {
     name: 'delegate_to_app',
     description:
-      'Hand a self-contained coding task to a local coding agent (OpenCode, Kiro or Claude Code). It works in the project folder and can edit files. Returns its final report.',
+      'Hand a self-contained coding task to a local coding agent (OpenCode, Kiro, Kilo or Claude Code). It works in the project folder and can edit files. Returns its final report.',
     parameters: {
       type: 'object',
       properties: {
-        app: { type: 'string', enum: ['opencode', 'kiro', 'claude'] },
+        app: { type: 'string', enum: ['opencode', 'kiro', 'kilo', 'claude'] },
         task: { type: 'string', description: 'Full, specific instructions. The agent does not see this conversation.' }
       },
       required: ['app', 'task']

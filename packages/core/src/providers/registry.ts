@@ -1,6 +1,7 @@
 import type { ProviderSetupInfo, ProviderSummary } from '../api-types'
 import type { Store } from '../store'
 import type { ModelInfo, Provider } from '../types'
+import { KiloProvider } from './apps/kilo'
 import { KiroProvider } from './apps/kiro'
 import { OpenCodeProvider } from './apps/opencode'
 import { str, type ProviderContext } from './context'
@@ -97,6 +98,16 @@ const DEFAULTS: Record<string, Defaults> = {
       loginHint: 'Run `kiro-cli login` once, or paste an API key.'
     }
   },
+  kilo: {
+    enabled: true,
+    priority: 72,
+    dailyLimit: null,
+    setup: {
+      docsUrl: 'https://kilo.ai/docs/code-with-ai/platforms/cli',
+      fields: APP_FIELDS('kilo', 'provider/model, e.g. kilo/kilo-auto'),
+      loginHint: 'Run `kilo auth login` once in a terminal.'
+    }
+  },
   mock: { enabled: true, priority: 999, dailyLimit: null, setup: { fields: [] } }
 }
 
@@ -143,6 +154,7 @@ export class ProviderRegistry {
     }
     this.add(new OpenCodeProvider(ctx('opencode')))
     this.add(new KiroProvider(ctx('kiro')))
+    this.add(new KiloProvider(ctx('kilo')))
     this.add(new MockProvider())
 
     for (const [pid, d] of Object.entries(DEFAULTS)) store.ensureProvider(pid, { enabled: d.enabled, priority: d.priority })
