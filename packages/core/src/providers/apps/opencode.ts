@@ -1,43 +1,76 @@
-import { spawn, type ChildProcess } from 'node:child_process'
-import { createServer } from 'node:net'
-import { ProviderError, type ChatMessage, type ChatOptions, type Delta, type ModelInfo, type Provider, type ProviderStatus } from '../../types'
-import { readSse, sleep } from '../../util'
+import { ProviderError, errorKindFromStatus, type ChatMessage, type ChatOptions, type Delta, type ModelInfo, type Provider, type ProviderStatus } from '../../types'
+import { runProcess } from '../../util'
 import { str, type ProviderContext } from '../context'
 import { appStatus, binaryFor, detect, singleModel, taskFromMessages } from './base'
 import { streamProcess } from './process-stream'
 
 interface OpenCodePart {
-  id?: string
-  sessionID?: string
-  type: string
+  type?: string
   text?: string
   tool?: string
-  state?: { status?: string; title?: string }
+  state?: { title?: string; status?: string }
 }
 
-function freePort(): Promise<number> {
-  return new Promise((resolve, reject) => {
-    const srv = createServer()
-    srv.once('error', reject)
-    srv.listen(0, '127.0.0.1', () => {
-      const addr = srv.address()
-      srv.close(() => resolve(typeof addr === 'object' && addr ? addr.port : 0))
-    })
-  })
+interface OpenCodeEvent {
+  type?: string
+  part?: OpenCodePart
+  error?: unknown
 }
 
-/**
- * OpenCode coding agent. Runs `opencode serve` per working directory and drives it over HTTP,
- * falling back to `opencode run` when the server cannot start.
- */
+const AUTH_ERROR = /login|auth|unauthori[sz]ed|token/i
+
+/** `--model` requires `provider/model`. A bare name is left unset. */
+export function opencodeModelArg(model: string | undefined): string | undefined {
+  const m = model?.trim()
+  if (!m || m === 'default' || !m.includes('/') || m.startsWith('/') || m.endsWith('/')) return undefined
+  return m
+}
+
+/** One stdout line from `opencode run --format json`. Non-JSON lines and ignored event types yield nothing. */
+export function parseOpenCodeRunLine(line: string): Delta[] {
+  const ev = parseEvent(line)
+  if (!ev) return []
+  if (ev.type === 'text' && ev.part?.text) return [{ type: 'text', text: ev.part.text }]
+  if (ev.type === 'tool_use') {
+    const name = ev.part?.tool || ev.part?.state?.title || 'tool'
+    return [{ type: 'status', message: `OpenCode: ${name}` }]
+  }
+  if (ev.type === 'error') return [{ type: 'status', message: `OpenCode: ${errorText(ev.error)}` }]
+  return []
+}
+
+function parseEvent(line: string): OpenCodeEvent | null {
+  try {
+    return JSON.parse(line) as OpenCodeEvent
+  } catch {
+    return null
+  }
+}
+
+function errorStatus(error: unknown): number | undefined {
+  if (!error || typeof error !== 'object' || !('status' in error)) return undefined
+  const status = (error as { status?: unknown }).status
+  return typeof status === 'number' ? status : undefined
+}
+
+function errorText(error: unknown): string {
+  if (typeof error === 'string' && error.trim()) return error.trim()
+  if (error && typeof error === 'object') {
+    const e = error as { name?: string; message?: string; data?: { message?: string } }
+    return e.data?.message || e.message || e.name || 'OpenCode run failed'
+  }
+  return 'OpenCode run failed'
+}
+
+/** OpenCode's headless CLI. `--format json` prints one event per stdout line; the task is written to stdin. */
 export class OpenCodeProvider implements Provider {
   readonly id = 'opencode'
   readonly name = 'OpenCode'
   readonly kind = 'app' as const
-  readonly description = 'Open-source coding agent. FreeAgent starts `opencode serve` in the project folder and sends it tasks over its HTTP API.'
+  readonly description = 'OpenCode CLI agent in headless mode (`opencode run --auto --format json`), run in the project folder.'
   readonly supportsTools = false
   readonly tags = ['code' as const, 'general' as const]
-  private servers = new Map<string, { url: string; proc: ChildProcess }>()
+  private cachedFreeModel: string | undefined
 
   constructor(private readonly ctx: ProviderContext) {}
 
@@ -50,159 +83,61 @@ export class OpenCodeProvider implements Provider {
   }
 
   async models(): Promise<ModelInfo[]> {
-    const configured = str(this.ctx.config().model)
+    const configured = opencodeModelArg(str(this.ctx.config().model))
     return configured ? [{ id: configured, name: configured, tags: ['code', 'general'] }] : singleModel('OpenCode')
   }
 
   async defaultModel(): Promise<string> {
-    return str(this.ctx.config().model) ?? 'default'
+    return opencodeModelArg(str(this.ctx.config().model)) ?? 'default'
   }
 
-  private async server(cwd: string): Promise<string> {
-    const existing = this.servers.get(cwd)
-    if (existing && existing.proc.exitCode === null) return existing.url
-    const port = await freePort()
-    const proc = spawn(this.bin(), ['serve', '--port', String(port), '--hostname', '127.0.0.1'], {
-      cwd,
-      env: process.env,
-      stdio: 'ignore',
-      shell: process.platform === 'win32'
-    })
-    const url = `http://127.0.0.1:${port}`
-    this.servers.set(cwd, { url, proc })
-    proc.on('exit', () => {
-      if (this.servers.get(cwd)?.proc === proc) this.servers.delete(cwd)
-    })
-    for (let i = 0; i < 60; i++) {
-      if (proc.exitCode !== null) break
-      try {
-        const res = await fetch(`${url}/config`, { signal: AbortSignal.timeout(1000) })
-        if (res.ok) return url
-      } catch {
-        // not up yet
-      }
-      await sleep(250)
-    }
-    proc.kill()
-    throw new Error('opencode serve did not start')
-  }
-
-  dispose(): void {
-    for (const s of this.servers.values()) s.proc.kill()
-    this.servers.clear()
+  /** First zero-cost id from `opencode models` (`*-free` or `big-pickle`). The account default can be paid. */
+  private async freeModel(): Promise<string | undefined> {
+    if (this.cachedFreeModel) return this.cachedFreeModel
+    const listed = await runProcess(this.bin(), ['models'], { timeoutMs: 20_000 })
+    if (listed.code !== 0) return undefined
+    const id = listed.stdout
+      .split('\n')
+      .map((line) => line.trim())
+      .find((line) => line.endsWith('-free') || line.endsWith('/big-pickle'))
+    if (id) this.cachedFreeModel = id
+    return id
   }
 
   async *chat(messages: ChatMessage[], opts: ChatOptions): AsyncIterable<Delta> {
-    const d = detect(this.bin())
-    if (!d.path) throw new ProviderError(this.id, 'unavailable', 'OpenCode is not installed')
-    const cwd = opts.cwd ?? process.cwd()
-    const task = taskFromMessages(messages)
-    let url: string
-    try {
-      url = await this.server(cwd)
-    } catch {
-      yield { type: 'status', message: 'OpenCode server unavailable, using `opencode run`' }
-      yield* this.runFallback(task, cwd, opts)
-      return
+    if (!detect(this.bin()).path) throw new ProviderError(this.id, 'unavailable', 'OpenCode is not installed')
+    const args = ['run', '--auto', '--format', 'json']
+    const requested = str(this.ctx.config().model) ?? (opts.model && opts.model !== 'default' ? opts.model : undefined)
+    const configured = opencodeModelArg(requested)
+    if (requested && !configured && requested.trim() !== 'default') {
+      yield { type: 'status', message: `OpenCode ignored model "${requested.trim()}". Use provider/model, for example opencode/beam-free.` }
     }
-    yield* this.runViaServer(url, task, opts)
-  }
-
-  private async *runViaServer(url: string, task: string, opts: ChatOptions): AsyncIterable<Delta> {
-    const session = (await (
-      await fetch(`${url}/session`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ title: task.slice(0, 60) })
-      })
-    ).json()) as { id: string }
-
-    const queue: Delta[] = []
-    let streamedText = false
-    let wake: (() => void) | undefined
-    const push = (d: Delta): void => {
-      queue.push(d)
-      wake?.()
-    }
-    const events = new AbortController()
-    const seenTools = new Set<string>()
-    const eventLoop = (async () => {
-      try {
-        const res = await fetch(`${url}/event`, { signal: events.signal })
-        if (!res.body) return
-        for await (const ev of readSse(res.body, events.signal)) {
-          const msg = JSON.parse(ev.data) as { type: string; properties?: { part?: OpenCodePart; delta?: string } }
-          const part = msg.properties?.part
-          if (msg.type !== 'message.part.updated' || !part || part.sessionID !== session.id) continue
-          if (part.type === 'text' && msg.properties?.delta) {
-            streamedText = true
-            push({ type: 'text', text: msg.properties.delta })
-          } else if (part.type === 'tool' && part.state?.status === 'running' && part.id && !seenTools.has(part.id)) {
-            seenTools.add(part.id)
-            push({ type: 'status', message: `OpenCode: ${part.state.title || part.tool}` })
-          }
-        }
-      } catch {
-        // event stream closed
-      }
-    })()
-
-    const model = str(this.ctx.config().model) ?? (opts.model && opts.model !== 'default' ? opts.model : undefined)
-    const body: Record<string, unknown> = { parts: [{ type: 'text', text: task }] }
-    if (model?.includes('/')) {
-      const [providerID, ...rest] = model.split('/')
-      body.model = { providerID, modelID: rest.join('/') }
-    }
-    let result: { parts?: OpenCodePart[] } | undefined
-    let error: unknown
-    let done = false
-    const request = fetch(`${url}/session/${session.id}/message`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: opts.signal
-    })
-      .then(async (r) => {
-        if (!r.ok) throw new ProviderError(this.id, 'server', `OpenCode returned ${r.status}: ${(await r.text()).slice(0, 300)}`)
-        result = (await r.json()) as { parts?: OpenCodePart[] }
-      })
-      .catch((e) => {
-        error = e
-      })
-      .finally(() => {
-        done = true
-        wake?.()
-      })
-
-    push({ type: 'status', message: 'OpenCode is working…' })
-    while (true) {
-      if (queue.length) {
-        yield queue.shift()!
+    const model = configured ?? (await this.freeModel())
+    if (model) args.push('--model', model)
+    if (!configured && model) yield { type: 'status', message: `OpenCode model: ${model}` }
+    yield { type: 'status', message: 'OpenCode is working…' }
+    const proc = streamProcess(this.id, this.bin(), args, { cwd: opts.cwd, signal: opts.signal, input: taskFromMessages(messages) })
+    let runError: string | undefined
+    let runStatus: number | undefined
+    for await (const line of proc.lines) {
+      if (line.stream !== 'stdout') continue
+      const ev = parseEvent(line.text)
+      if (ev?.type === 'error') {
+        const message = errorText(ev.error)
+        const status = errorStatus(ev.error)
+        if (AUTH_ERROR.test(message)) throw new ProviderError(this.id, 'auth', message, status)
+        runError = message
+        runStatus = status
         continue
       }
-      if (done) break
-      await new Promise<void>((r) => (wake = r))
-      wake = undefined
-    }
-    events.abort()
-    await eventLoop
-    if (opts.signal?.aborted) {
-      await fetch(`${url}/session/${session.id}/abort`, { method: 'POST' }).catch(() => undefined)
-      throw new ProviderError(this.id, 'aborted', 'Cancelled')
-    }
-    if (error) throw error instanceof ProviderError ? error : new ProviderError(this.id, 'server', String(error))
-    if (!streamedText) {
-      const text = (result?.parts ?? []).filter((p) => p.type === 'text' && p.text).map((p) => p.text).join('\n\n')
-      yield { type: 'text', text: text || '(OpenCode finished without a text reply.)' }
-    }
-  }
-
-  private async *runFallback(task: string, cwd: string, opts: ChatOptions): AsyncIterable<Delta> {
-    const proc = streamProcess(this.id, this.bin(), ['run', task], { cwd, signal: opts.signal })
-    for await (const line of proc.lines) {
-      if (line.stream === 'stdout') yield { type: 'text', text: line.text + '\n' }
+      for (const delta of parseOpenCodeRunLine(line.text)) yield delta
     }
     const { code, stderr } = await proc.done
-    if (code !== 0) throw new ProviderError(this.id, 'server', `opencode run exited with ${code}: ${stderr.slice(-400)}`)
+    if (opts.signal?.aborted) throw new ProviderError(this.id, 'aborted', 'Cancelled')
+    if (code !== 0) {
+      const detail = runError || stderr.trim().slice(-400) || 'no output'
+      const kind = AUTH_ERROR.test(`${runError ?? ''}\n${stderr}`) ? 'auth' : runStatus ? errorKindFromStatus(runStatus) : 'server'
+      throw new ProviderError(this.id, kind, `opencode run exited with ${code}: ${detail}`, runStatus)
+    }
   }
 }

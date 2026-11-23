@@ -290,7 +290,6 @@ export class ProviderRegistry {
   }
 
   async dispose(): Promise<void> {
-    ;(this.get('opencode') as OpenCodeProvider | undefined)?.dispose()
     await this.pool.closeAll()
   }
 }
