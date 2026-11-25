@@ -165,7 +165,8 @@ export class AgentRunner {
   }
 
   private async agent(input: RunInput): Promise<RunResult> {
-    const tools = await this.tools()
+    const disabled = new Set(this.deps.store.getSettings().disabledTools)
+    const tools = (await this.tools()).filter((t) => !disabled.has(t.spec.name))
     const byName = new Map(tools.map((t) => [t.spec.name, t]))
     const specs = tools.map((t) => t.spec)
     // One id for the whole run lets web providers keep a single site conversation open across steps.

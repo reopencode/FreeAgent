@@ -213,6 +213,8 @@ export interface AppSettings {
   maxAgentSteps: number
   /** Provider ids that receive a short Agent-mode prompt: the current request, this run's tool results, and a one-line instruction. */
   minimalAgentProviders: string[]
+  /** Tool names left out of Agent mode. Missing or empty means every tool is sent. */
+  disabledTools: string[]
 }
 
 export interface ServerInfo {

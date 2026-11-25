@@ -15,6 +15,7 @@ class SessionProbe implements Provider {
   readonly tags = ['general' as const]
   readonly seen: (string | undefined)[] = []
   readonly ended: string[] = []
+  readonly sentTools: string[][] = []
   private calls = 0
   constructor(
     readonly id: string,
@@ -34,6 +35,7 @@ class SessionProbe implements Provider {
   }
   async *chat(_messages: ChatMessage[], opts: ChatOptions): AsyncIterable<Delta> {
     this.seen.push(opts.sessionId)
+    this.sentTools.push((opts.tools ?? []).map((t) => t.name))
     if (this.calls++ === 0) {
       yield { type: 'tool_call', call: { id: 'c1', name: 'fs_list', arguments: '{}' } }
       return
@@ -101,6 +103,18 @@ describe('agent runs keep one provider session', () => {
     await core.runner.run({ messages: [{ role: 'user', content: 'list files' }], mode: 'agent', target: 'auto', cwd, chatId: 'chat_1', emit: () => undefined })
     expect(probe.seen).toEqual(['chat_1', 'chat_1'])
     expect(probe.ended).toEqual([])
+  })
+
+  it('omits a disabled tool from the provider and does not run it', async () => {
+    core.store.updateSettings({ disabledTools: ['fs_list'] })
+    const probe = new SessionProbe('probe')
+    addFake(core, probe, 1)
+    const events: AgentEvent[] = []
+    await core.runner.run({ messages: [{ role: 'user', content: 'list files' }], mode: 'agent', target: 'auto', cwd, emit: (e) => events.push(e) })
+    expect(probe.sentTools[0]).not.toContain('fs_list')
+    expect(probe.sentTools[0]?.length).toBeGreaterThan(0)
+    const result = events.find((e) => e.type === 'tool_result')
+    expect(result && result.type === 'tool_result' && !result.ok && result.output).toContain('Unknown tool')
   })
 
   it('ends a chat session on every provider when the chat is deleted', async () => {

@@ -500,6 +500,23 @@ function McpTab(): React.JSX.Element {
   const qc = useQueryClient()
   const mcp = useMcpServers()
   const tools = useTools()
+  const settings = useSettings()
+  const toggleTool = useMutation({
+    mutationFn: (name: string) => {
+      const disabled =
+        qc.getQueryData<AppSettings>(keys.settings)?.disabledTools ??
+        settings.data?.disabledTools ??
+        tools.data?.filter((t) => !t.enabled).map((t) => t.name) ??
+        []
+      const next = disabled.includes(name) ? disabled.filter((n) => n !== name) : [...disabled, name]
+      return api.patch<AppSettings>('/api/settings', { disabledTools: next })
+    },
+    onSuccess: (data) => {
+      qc.setQueryData(keys.settings, data)
+      void qc.invalidateQueries({ queryKey: keys.tools })
+    },
+    onError: (e) => toast.error(e.message)
+  })
   const [open, setOpen] = useState(false)
   const [form, setForm] = useState({ name: '', transport: 'stdio' as 'stdio' | 'http', command: '', args: '', url: '', env: '' })
   const add = useMutation({
@@ -577,6 +594,7 @@ function McpTab(): React.JSX.Element {
         <div className="divide-y rounded-xl border bg-card">
           {tools.data?.map((t) => (
             <div key={t.name} className="flex items-start gap-3 px-4 py-2.5">
+              <Switch checked={t.enabled} onCheckedChange={() => toggleTool.mutate(t.name)} aria-label={`${t.enabled ? 'Disable' : 'Enable'} ${t.name}`} className="mt-0.5" />
               <code className="shrink-0 text-xs font-medium">{t.name}</code>
               <span className="min-w-0 flex-1 text-xs text-muted-foreground">{t.description}</span>
               {t.requiresApproval && (

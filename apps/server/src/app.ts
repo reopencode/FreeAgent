@@ -509,7 +509,17 @@ export function createApp(core: Core, cfg: ServerConfig, scheduler: Scheduler): 
     return c.json({ ok: true })
   })
 
-  app.get('/api/tools', async (c) => c.json((await core.runner.tools()).map((t) => ({ name: t.spec.name, description: t.spec.description, requiresApproval: t.requiresApproval }))))
+  app.get('/api/tools', async (c) => {
+    const disabled = new Set(store.getSettings().disabledTools)
+    return c.json(
+      (await core.runner.tools()).map((t) => ({
+        name: t.spec.name,
+        description: t.spec.description,
+        requiresApproval: t.requiresApproval,
+        enabled: !disabled.has(t.spec.name)
+      }))
+    )
+  })
 
   // Integrations
 

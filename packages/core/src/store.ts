@@ -137,7 +137,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
   councilSize: 3,
   showBrowser: false,
   maxAgentSteps: 12,
-  minimalAgentProviders: []
+  minimalAgentProviders: [],
+  disabledTools: []
 }
 
 export class Store {

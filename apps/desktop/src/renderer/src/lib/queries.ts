@@ -91,7 +91,11 @@ export const useClaudeDesktop = () =>
     queryFn: () => api.get<{ linked: boolean; configPath: string; entry: { command: string; args: string[]; env: Record<string, string> } }>('/api/integrations/claude-desktop')
   })
 export const useTools = () =>
-  useQuery({ queryKey: keys.tools, queryFn: () => api.get<{ name: string; description: string; requiresApproval: boolean }[]>('/api/tools'), staleTime: 30_000 })
+  useQuery({
+    queryKey: keys.tools,
+    queryFn: () => api.get<{ name: string; description: string; requiresApproval: boolean; enabled: boolean }[]>('/api/tools'),
+    staleTime: 30_000
+  })
 export const useSkills = () => useQuery({ queryKey: keys.skills, queryFn: () => api.get<SkillInfo[]>('/api/skills') })
 export const usePlugins = () => useQuery({ queryKey: keys.plugins, queryFn: () => api.get<PluginInfo[]>('/api/plugins') })
 export const useMemories = () => useQuery({ queryKey: keys.memories, queryFn: () => api.get<MemoryFact[]>('/api/memories') })
