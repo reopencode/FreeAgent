@@ -30,6 +30,8 @@ export class FakeProvider implements Provider {
   readonly supportsTools = true
   readonly tags = ['general' as const]
   calls = 0
+  lastMessages: ChatMessage[] = []
+  lastTools: ChatOptions['tools']
 
   constructor(
     readonly id: string,
@@ -48,8 +50,10 @@ export class FakeProvider implements Provider {
   async defaultModel() {
     return 'm'
   }
-  async *chat(_messages: ChatMessage[], _opts: ChatOptions): AsyncIterable<Delta> {
+  async *chat(messages: ChatMessage[], opts: ChatOptions): AsyncIterable<Delta> {
     this.calls++
+    this.lastMessages = messages
+    this.lastTools = opts.tools
     if (this.behavior.fail && !this.behavior.failAfterText) throw new ProviderError(this.id, this.behavior.fail, `${this.id} failed`)
     yield { type: 'text', text: this.behavior.reply ?? `hello from ${this.id}` }
     if (this.behavior.fail) throw new ProviderError(this.id, this.behavior.fail, `${this.id} broke mid-reply`)

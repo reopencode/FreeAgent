@@ -1,3 +1,4 @@
+import { agentRequestForProvider } from './agent/minimal-context'
 import type { ProviderRegistry } from './providers/registry'
 import type { Store } from './store'
 import { applyTextDelta } from './util'
@@ -185,10 +186,12 @@ export class Router {
       yield { type: 'route', providerId: provider.id, model, attempt }
       let produced = false
       let usage = { inputTokens: 0, outputTokens: 0 }
+      const selected = req.tools?.length ? this.store.getSettings().minimalAgentProviders : undefined
+      const payload = agentRequestForProvider(provider.id, selected, messages, req.tools, req.cwd)
       try {
-        for await (const d of provider.chat(messages, {
+        for await (const d of provider.chat(payload.messages, {
           model,
-          tools: req.tools,
+          tools: payload.tools,
           signal: req.signal,
           cwd: req.cwd,
           sessionId: req.sessionId,

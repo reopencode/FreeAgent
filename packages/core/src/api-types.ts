@@ -211,8 +211,8 @@ export interface AppSettings {
   councilSize: number
   showBrowser: boolean
   maxAgentSteps: number
-  /** When true, website providers type only the latest user message (no instructions/history). */
-  webPlainText: boolean
+  /** Provider ids that receive a short Agent-mode prompt: the current request, this run's tool results, and a one-line instruction. */
+  minimalAgentProviders: string[]
 }
 
 export interface ServerInfo {

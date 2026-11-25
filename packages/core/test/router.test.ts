@@ -74,6 +74,33 @@ describe('Router', () => {
     expect(withReal.map((c) => c.provider.id)).toEqual(['real'])
   })
 
+  it('shrinks an agent step only for a checked provider', async () => {
+    core = testCore()
+    const a = addFake(core, new FakeProvider('a', {}), 10)
+    const messages = [
+      { role: 'system' as const, content: 'Personal instructions and a large project file.' },
+      { role: 'user' as const, content: 'an older turn' },
+      { role: 'assistant' as const, content: 'an older reply' },
+      { role: 'user' as const, content: 'fix the bug' }
+    ]
+    const tools = [{ name: 'fs_read', description: 'x'.repeat(120), parameters: { type: 'object' as const, properties: { path: { type: 'string' } } } }]
+    await collect(core.router.chat(messages, { target: 'a', tools, cwd: '/work/app' }))
+    expect(a.lastMessages).toEqual(messages)
+    expect(a.lastTools?.[0].description).toHaveLength(120)
+
+    core.store.updateSettings({ minimalAgentProviders: ['a'] })
+    await collect(core.router.chat(messages, { target: 'a', cwd: '/work/app' }))
+    expect(a.lastMessages).toEqual(messages)
+
+    await collect(core.router.chat(messages, { target: 'a', tools, cwd: '/work/app' }))
+    expect(a.lastMessages.map((m) => m.content)).toEqual([
+      'You are an agent. You are working in /work/app. Call tools to do the work. Do only the current task. Finish with a short summary.',
+      'fix the bug'
+    ])
+    expect(a.lastTools?.[0].description).toHaveLength(80)
+    expect(a.lastTools?.[0].parameters).toEqual(tools[0].parameters)
+  })
+
   it('throws a clear error when nothing is set up', async () => {
     core = testCore()
     await expect(collect(core.router.chat([{ role: 'user', content: 'hi' }], { target: 'auto' }))).rejects.toBeInstanceOf(NoProviderError)

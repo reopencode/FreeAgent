@@ -759,6 +759,7 @@ function MemorySection(): React.JSX.Element {
 function GeneralTab(): React.JSX.Element {
   const qc = useQueryClient()
   const settings = useSettings()
+  const providers = useProviders()
   const info = useInfo()
   const [prompt, setPrompt] = useState('')
   useEffect(() => {
@@ -819,9 +820,31 @@ function GeneralTab(): React.JSX.Element {
         <Row title="Show browser windows" hint="Show the browser while website providers work. When off, a window still opens by itself if a site asks for a human check.">
           <Switch checked={s.showBrowser} onCheckedChange={(v) => update.mutate({ showBrowser: v })} />
         </Row>
-        <Row title="Web chat: send message only" hint="Website providers keep one site conversation per chat and type just your latest message into it. Skips personal/project instructions, and sends earlier turns only when a conversation has to be reopened. Agent mode always sends the instructions and tools.">
-          <Switch checked={s.webPlainText} onCheckedChange={(v) => update.mutate({ webPlainText: v })} />
-        </Row>
+        <div className="py-3">
+          <p className="text-sm font-medium">Minimal agent context</p>
+          <p className="text-xs text-muted-foreground">
+            In Agent mode, checked providers get only the current request, this run's tool results, and a one-line instruction. Other providers get the full prompt. Leave them all unchecked to send the full prompt everywhere.
+          </p>
+          <div className="mt-2 flex flex-wrap gap-2">
+            {(providers.data ?? []).map((p) => {
+              const checked = s.minimalAgentProviders.includes(p.id)
+              return (
+                <label key={p.id} className="flex items-center gap-2 rounded-md border px-2 py-1 text-sm">
+                  <input
+                    type="checkbox"
+                    className="size-3.5 accent-primary"
+                    checked={checked}
+                    onChange={(e) => {
+                      const next = e.target.checked ? [...s.minimalAgentProviders, p.id] : s.minimalAgentProviders.filter((id) => id !== p.id)
+                      update.mutate({ minimalAgentProviders: next })
+                    }}
+                  />
+                  {p.name}
+                </label>
+              )
+            })}
+          </div>
+        </div>
         <Row title="Council size" hint="How many providers answer in Council mode.">
           <Input type="number" min={2} max={6} className="w-20" value={s.councilSize} onChange={(e) => update.mutate({ councilSize: Math.max(2, Math.min(6, Number(e.target.value) || 3)) })} />
         </Row>

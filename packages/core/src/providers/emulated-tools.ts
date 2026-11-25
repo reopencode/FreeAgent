@@ -295,17 +295,15 @@ export function agentPrompt(messages: ChatMessage[], tools: ToolSpec[], known?: 
  * What to type for one turn of a saved chat that keeps a website conversation open.
  * `known` is how many user turns the site thread already holds, or undefined when the thread is new to it
  * (first turn, a restart, a lost tab, or a chat that earlier turns answered on another provider).
- * Plain-text mode never sends instructions, but it does replay earlier turns once into a thread that lacks them.
+ * A thread that already holds the earlier turns gets only the latest message. A new thread, or one that
+ * missed turns another provider answered, gets the conversation once, including instructions.
  */
-export function threadPrompt(messages: ChatMessage[], opts: { plain: boolean; known?: number }): string {
+export function threadPrompt(messages: ChatMessage[], opts: { known?: number } = {}): string {
   const users = messages.filter((m) => m.role === 'user').length
   const latest = latestUserText(messages)
-  if (opts.known === undefined) {
-    if (users <= 1) return opts.plain && latest ? latest : flattenConversation(messages)
-    return flattenConversation(opts.plain ? messages.filter((m) => m.role !== 'system') : messages)
-  }
+  if (opts.known === undefined) return flattenConversation(messages)
   // The site holds every turn up to `known`; it only misses turns another provider answered in between.
-  if (!latest || (!opts.plain && users > opts.known + 1)) return flattenConversation(messages)
+  if (!latest || users > opts.known + 1) return flattenConversation(messages)
   return latest
 }
 

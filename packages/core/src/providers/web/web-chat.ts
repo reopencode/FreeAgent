@@ -4,7 +4,7 @@ import type { Page } from 'playwright'
 import { ProviderError, type ChatMessage, type ChatOptions, type Delta, type ModelInfo, type Provider, type ProviderStatus, type ToolSpec } from '../../types'
 import { sleep } from '../../util'
 import { str, type ProviderContext } from '../context'
-import { agentPrompt, flattenConversation, latestUserText, parseEmulatedToolCalls, repairPrompt, threadPrompt, type EmulatedToolCalls, type SiteThread } from '../emulated-tools'
+import { agentPrompt, flattenConversation, parseEmulatedToolCalls, repairPrompt, threadPrompt, type EmulatedToolCalls, type SiteThread } from '../emulated-tools'
 import { BrowserMissingError, type ProfilePool } from './browser'
 import { isSiteDefaultModel, pickModelOption, webDefaultModel, webModelInfo } from './model'
 import { htmlToMarkdown, REPLY_SNAPSHOT_SOURCE } from './reply-markdown'
@@ -250,10 +250,7 @@ export class WebChatProvider implements Provider {
 
   async *chat(messages: ChatMessage[], opts: ChatOptions): AsyncIterable<Delta> {
     const tools = opts.tools?.length ? opts.tools : undefined
-    // Tools only work through the full emulated-tool prompt, so plain-text mode applies to chat only.
-    const plain = this.ctx.settings().webPlainText && !tools
-    const plainText = plain ? latestUserText(messages) : undefined
-    const prompt = plainText ?? flattenConversation(messages, tools)
+    const prompt = flattenConversation(messages, tools)
     const site = this.site()
     const queue: Delta[] = []
     let finished = false
@@ -413,7 +410,6 @@ export class WebChatProvider implements Provider {
    */
   private async runInThread(site: WebSiteConfig, messages: ChatMessage[], opts: ChatOptions, push: (d: Delta) => void): Promise<string> {
     const sessionId = opts.sessionId!
-    const plain = this.ctx.settings().webPlainText
     const users = messages.filter((m) => m.role === 'user').length
     const finish = (session: WebSession, reply: string): string => {
       session.known = { users, tools: session.known.tools }
@@ -431,7 +427,7 @@ export class WebChatProvider implements Provider {
           push(d)
         }
         try {
-          const reply = await this.sendAndRead(session.page, site, threadPrompt(messages, { plain, known: session.known.users }), opts, track)
+          const reply = await this.sendAndRead(session.page, site, threadPrompt(messages, { known: session.known.users }), opts, track)
           return finish(session, reply)
         } catch (err) {
           if (opts.signal?.aborted || produced || isFinal(err)) throw err
@@ -445,7 +441,7 @@ export class WebChatProvider implements Provider {
       const fresh: WebSession = { page, known: known ?? { users: 0, tools: false } }
       // Register before sending so endSession can close the tab even if this request is cancelled.
       this.sessions.set(sessionId, fresh)
-      const reply = await this.sendAndRead(page, site, threadPrompt(messages, { plain, known: known?.users }), opts, push)
+      const reply = await this.sendAndRead(page, site, threadPrompt(messages, { known: known?.users }), opts, push)
       return finish(fresh, reply)
     } catch (err) {
       await this.dropSession(sessionId)
