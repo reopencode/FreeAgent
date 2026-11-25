@@ -13,6 +13,8 @@ FreeAgent also runs a local server, so other tools can use your free providers:
 - **Claude Code** can point at its Anthropic-compatible endpoint.
 - **Cursor, Continue, Aider and OpenCode** can use its OpenAI-compatible endpoint.
 
+**OpenCode** no longer starts `opencode serve`. It runs `opencode run` in the project folder, the same idea as Kiro and Kilo, and picks a free model when none is set. **Agent tools** can be switched off under Customize → MCP servers, and disabled tools are not sent to the provider. **Website providers** close cookie banners and dialogs on their own, and a human check opens a browser window even when Show browser windows is off.
+
 ## Screenshots
 
 New chat, with the offline demo ready until a provider is configured:
@@ -103,7 +105,7 @@ If the desktop app finds a headless server already running on the same data fold
 | Gemini API | Create a key at [aistudio.google.com/apikey](https://aistudio.google.com/apikey). The default model is `gemini-2.5-flash`. |
 | Custom API | Click **Add API** under **Customize → Providers**. Enter a name and the base URL of any OpenAI-compatible Chat Completions endpoint. The API key and model are optional; without a key, requests go out without an `Authorization` header. |
 | Grok, ChatGPT, Gemini (web), Claude (web), DeepSeek, Pi, Kimi, Z.ai | Run `pnpm browsers` once. Then click **Sign in**, log in in the window that opens, close it, and click **Check login**. ChatGPT can also work without an account once you have connected it; the other sites need a sign-in. Each site keeps its own browser profile in `<dataDir>/browser-profiles/`. These are **experimental**: sites change their markup and add bot checks. If replies stop arriving, edit the selectors under **Selectors**, or turn on **Show browser windows** to solve a captcha. In Agent mode, tool calls are emulated through text: the site gets a compact tool list, replies with `tool_call` blocks, and gets one correction prompt if a block is malformed. Providers checked under **Minimal agent context** receive only the current request and this run's tool results. API providers are still more reliable for long tool runs. To use a specific model on a site, type its name in **Model name** (for example `Argon` on Gemini, `Expert` on Grok, `Sonnet` or `Opus` on Claude). Before each chat FreeAgent opens the site's model menu and clicks the matching entry; if nothing matches, the error lists what the menu offers. Leave it empty to keep the site's current model. Pi has no model menu. |
-| OpenCode | Install it ([opencode.ai](https://opencode.ai/docs)) and run `opencode auth login` once. FreeAgent starts `opencode serve` and sends tasks to it in the project folder. |
+| OpenCode | Install it ([opencode.ai](https://opencode.ai/docs)) and run `opencode auth login` once. FreeAgent runs `opencode run` in the project folder. |
 | Kiro | Install `kiro-cli`, then run `kiro-cli login` or paste a `KIRO_API_KEY`. Tasks run with `kiro-cli chat --no-interactive`. |
 | Kilo | Install the [Kilo CLI](https://kilo.ai/docs/code-with-ai/platforms/cli), then run `kilo auth login` once. Tasks run with `kilo run --auto` in the project folder. |
 
